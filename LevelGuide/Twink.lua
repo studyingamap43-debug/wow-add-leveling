@@ -34,7 +34,8 @@ function TW.GetLines(level, classTok)
   level = tonumber(level) or 1
   classTok = classTok or "WARRIOR"
   local role = CLASS_ROLE[classTok] or "MELEE"
-  local copper = (GetMoney and GetMoney()) or 0
+  local okM, rawM = pcall(GetMoney or function() return 0 end)
+  local copper = (okM and GL.Compat and GL.Compat.SafeNumber(rawM, 0)) or 0
   local gold = math.floor(copper / 10000)
 
   local tier = "Budget (<10g)"

@@ -73,3 +73,62 @@ function P.ExportClassGuide(classTok, level)
   end
   return table.concat(lines, "\n")
 end
+
+P.CLASS_REMINDERS = {
+  WARRIOR = "Warrior Tip: Keep weapon skill trained, stock First Aid bandages, and check stance/class quests at Lv 10 & 30.",
+  PALADIN = "Paladin Tip: Refresh Seals/Auras, keep weapon & shield updated, and check Lv 12 Redemption / Lv 20 Verigan's Fist / Lv 40 Mount.",
+  HUNTER  = "Hunter Tip: Stock ammo & pet food before leaving town; do Lv 10 Tame Beast immediately and keep pet skills trained.",
+  ROGUE   = "Rogue Tip: Keep main-hand weapon upgraded, practice Lockpicking at Lv 16+, and stock Poisons at Lv 20+.",
+  PRIEST  = "Priest Tip: Equip a Wand ASAP to save mana; check racial Priest quest at Lv 10.",
+  SHAMAN  = "Shaman Tip: Complete Earth (Lv 4), Fire (Lv 10), Water (Lv 20), and Air (Lv 30) totem quests.",
+  MAGE    = "Mage Tip: Conjure fresh food/water, stock teleport reagents, and check Forever Lv 20 Comprehension research.",
+  WARLOCK = "Warlock Tip: Keep Soul Shards stocked and complete Voidwalker (Lv 10), Succubus (Lv 20), Felhunter (Lv 30), and Felsteed (Lv 40).",
+  DRUID   = "Druid Tip: Complete Bear Form (Lv 10), Aquatic Form (Lv 16), and Cat Form (Lv 20) quests.",
+}
+
+P.CLASS_TO_BIT = {
+  WARRIOR = 1, PALADIN = 2, HUNTER = 4, ROGUE = 8, PRIEST = 16,
+  SHAMAN = 32, MAGE = 64, WARLOCK = 128, DRUID = 1024,
+}
+
+function P.GetClassStepsForEngine(classBit, level, db)
+  if type(classBit) ~= "number" or type(level) ~= "number" then return nil end
+  for classTok, bit in pairs(P.CLASS_TO_BIT) do
+    if GL.HasBit and GL.HasBit(classBit, bit) then
+      local list = P.CHAINS[classTok] or {}
+      for _, item in ipairs(list) do
+        if level >= item.lv and level <= item.lv + 3 then
+          local stepId = "CLASS:" .. classTok .. ":" .. tostring(item.lv)
+          local isDone = db and db.done and db.done[stepId]
+          local isSkipped = db and db.skipped and db.skipped[stepId]
+          local isIgnored = db and db.ignoredQuests and db.ignoredQuests[stepId]
+          if not isDone and not isSkipped and not isIgnored then
+            return {
+              id = stepId,
+              classTok = classTok,
+              classBit = bit,
+              lv = item.lv,
+              title = item.title,
+              note = item.note,
+              reminder = P.CLASS_REMINDERS[classTok] or "",
+              unverified = true,
+            }
+          end
+        end
+      end
+      break
+    end
+  end
+  return nil
+end
+
+function P.GetActiveClassAdvisory(classTok, level)
+  if not classTok then return nil end
+  local list = P.CHAINS[classTok] or {}
+  for _, item in ipairs(list) do
+    if level and level >= item.lv and level <= item.lv + 2 then
+      return string.format("[%s Lv %d] %s — %s [UNVERIFIED]", classTok, item.lv, item.title, item.note)
+    end
+  end
+  return nil
+end

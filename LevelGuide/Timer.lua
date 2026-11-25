@@ -26,10 +26,13 @@ function Tm.Tick(elapsed)
   Tm.sessionSec = Tm.sessionSec + dt
   Tm.levelSec = Tm.levelSec + dt
   Tm.stepSec = Tm.stepSec + dt
-  if GL.db then
+  Tm._saveAccum = (Tm._saveAccum or 0) + dt
+  if GL.db and Tm._saveAccum >= 10 then
+    local sd = Tm._saveAccum
+    Tm._saveAccum = 0
     GL.db.timer = type(GL.db.timer) == "table" and GL.db.timer or {}
     GL.db.timer.currentLevelSec = math.floor(Tm.levelSec)
-    GL.db.timer.totalPlayedGuideSec = (GL.db.timer.totalPlayedGuideSec or 0) + dt
+    GL.db.timer.totalPlayedGuideSec = math.floor((GL.db.timer.totalPlayedGuideSec or 0) + sd)
   end
 end
 

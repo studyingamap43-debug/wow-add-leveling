@@ -32,6 +32,7 @@ function MT.Create()
   end
 
   h:SetScript("OnUpdate", function(_, elapsed)
+    if not MT.target or (Minimap and not Minimap:IsVisible()) then return end
     MT.accum = MT.accum + (elapsed or 0)
     if MT.accum < UPDATE_HZ then return end
     MT.accum = 0
@@ -78,8 +79,20 @@ function MT.Update()
   if GL.Compat and GL.Compat.ReadPosition then
     pMapId, pZone, px, py = GL.Compat.ReadPosition()
   end
-  local sameMap = (tgt.mapId and pMapId and tgt.mapId == pMapId)
-    or (tgt.zoneName and pZone and string.lower(tgt.zoneName) == string.lower(pZone))
+  local sameMap = false
+  if tgt.mapId and pMapId then
+    if tgt.mapId == pMapId then
+      sameMap = true
+    elseif GL.Compat and GL.Compat.ReadPositionOnMap then
+      local ox, oy = GL.Compat.ReadPositionOnMap(tgt.mapId)
+      if ox and oy then
+        px, py = ox, oy
+        sameMap = true
+      end
+    end
+  elseif (not tgt.mapId or not pMapId) and tgt.zoneName and pZone and string.lower(tgt.zoneName) == string.lower(pZone) then
+    sameMap = true
+  end
   if not sameMap or not px or not py then
     MT.HideAll()
     return
@@ -106,19 +119,26 @@ function MT.Update()
 
   -- Account for rotating minimap CVar if enabled
   local rotMinimap = GL.Compat and GL.Compat.GetCVar("rotateMinimap") == "1"
-  if rotMinimap and GetPlayerFacing then
-    local okF, rawF = pcall(GetPlayerFacing)
-    local facing = (okF and GL.Compat and GL.Compat.SafeNumber(rawF, 0)) or 0
+  if rotMinimap then
+    local facing = GL.Compat and GL.Compat.PlayerFacing() or nil
+    if not facing then MT.HideAll() return end -- never draw wrong-angle trail when facing is secret/unavailable
     local cs, sn = math.cos(-facing), math.sin(-facing)
     local rx = sx * cs - sy * sn
     local ry = sx * sn + sy * cs
     sx, sy = rx, ry
   end
 
-  local zoom = (Minimap.GetZoom and Minimap:GetZoom()) or 0
-  local indoors = IsIndoors and IsIndoors()
-  local tbl = indoors and INDOOR_ZOOM_YARDS or OUTDOOR_ZOOM_YARDS
-  local radiusYd = tbl[zoom] or (indoors and 90.0 or 166.7)
+  local radiusYd = nil
+  if C_Minimap and C_Minimap.GetViewRadius then
+    local okR, rawR = pcall(C_Minimap.GetViewRadius)
+    if okR then radiusYd = GL.Compat and GL.Compat.SafeNumber(rawR, nil) or nil end
+  end
+  if not radiusYd or radiusYd <= 0 then
+    local zoom = (Minimap.GetZoom and Minimap:GetZoom()) or 0
+    local indoors = IsIndoors and IsIndoors()
+    local tbl = indoors and INDOOR_ZOOM_YARDS or OUTDOOR_ZOOM_YARDS
+    radiusYd = tbl[zoom] or (indoors and 90.0 or 166.7)
+  end
   local radiusPx = math.max(40, (Minimap:GetWidth() or 140) * 0.46)
 
   -- Scale target into minimap pixel space, clamping endpoint to the minimap rim

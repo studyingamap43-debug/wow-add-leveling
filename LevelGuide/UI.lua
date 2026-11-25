@@ -58,6 +58,7 @@ function UI.CreateMinimapButton()
       local mx, my = Minimap:GetCenter()
       local cx, cy = GetCursorPosition()
       local scale = Minimap:GetEffectiveScale()
+      if not mx or not my or not cx or not cy or not scale or scale <= 0 then return end
       local ang = math.deg(math.atan2((cy / scale) - my, (cx / scale) - mx))
       if GL.db and GL.db.ui then GL.db.ui.minimapAngle = ang end
       updatePos(ang)
@@ -242,6 +243,7 @@ function UI.ApplyVisualSettings()
   if UI.minimapBtn then
     if s.showMinimap == false then UI.minimapBtn:Hide() else UI.minimapBtn:Show() end
   end
+  if f.miniBtn then f.miniBtn:SetText(s.miniMode and "[+]" or "[-]") end
   if s.miniMode then
     if not inCombat() then f:SetHeight(108) end
     for _, b in pairs(f.tabs) do b:Hide() end
@@ -249,6 +251,7 @@ function UI.ApplyVisualSettings()
     if f.prevText then f.prevText:Hide() end
     if f.nextText then f.nextText:Hide() end
     if f.skip then f.skip:Hide() end
+    if f.ignoreBtn then f.ignoreBtn:Hide() end
     if f.pin then f.pin:Hide() end
     if f.resyncBtn then f.resyncBtn:Hide() end
     if f.speakBtn then f.speakBtn:Hide() end
@@ -324,13 +327,17 @@ function UI.Create()
   f.voiceToggle:SetPoint("RIGHT", f.close, "LEFT", -4, 0)
   f.voiceToggle:SetScript("OnClick", function() GL.CmdVoice("toggle") end)
 
-  f.miniBtn = mkbtn(f, "Mini", 36, 18)
+  f.miniBtn = mkbtn(f, "[-]", 26, 18)
   f.miniBtn:SetPoint("RIGHT", f.voiceToggle, "LEFT", -4, 0)
   f.miniBtn:SetScript("OnClick", function() GL.CmdMini() end)
 
   f.scanBtn = mkbtn(f, "Scan", 38, 18)
   f.scanBtn:SetPoint("RIGHT", f.miniBtn, "LEFT", -4, 0)
   f.scanBtn:SetScript("OnClick", function() GL.CmdScan() end)
+
+  f.paceBtn = mkbtn(f, "Pace", 38, 18)
+  f.paceBtn:SetPoint("RIGHT", f.scanBtn, "LEFT", -4, 0)
+  f.paceBtn:SetScript("OnClick", function() GL.CmdPace() end)
 
   -- Mini-mode single-line display
   f.miniLine = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -399,6 +406,91 @@ function UI.Create()
   f.scroll = scroll
   f.scrollContent = content
 
+  -- Interactive step checkboxes (up to 6 clickable walkthrough rows with real visual boxes)
+  f.stepChecks = {}
+  for i = 1, 6 do
+    local cb = CreateFrame("Button", nil, content)
+    cb:SetHeight(20)
+    cb:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -((i - 1) * 21))
+    cb:SetPoint("TOPRIGHT", content, "TOPRIGHT", -4, -((i - 1) * 21))
+    local hl = cb:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints(cb)
+    hl:SetColorTexture(1, 0.85, 0.35, 0.08)
+
+    local box = CreateFrame("Frame", nil, cb)
+    box:SetSize(14, 14)
+    box:SetPoint("LEFT", cb, "LEFT", 1, 0)
+    local boxBg = box:CreateTexture(nil, "BACKGROUND")
+    boxBg:SetAllPoints(box)
+    boxBg:SetColorTexture(0.08, 0.08, 0.10, 0.95)
+    local bTop = box:CreateTexture(nil, "BORDER")
+    bTop:SetPoint("TOPLEFT", 0, 0) bTop:SetPoint("TOPRIGHT", 0, 0) bTop:SetHeight(1)
+    local bBot = box:CreateTexture(nil, "BORDER")
+    bBot:SetPoint("BOTTOMLEFT", 0, 0) bBot:SetPoint("BOTTOMRIGHT", 0, 0) bBot:SetHeight(1)
+    local bLeft = box:CreateTexture(nil, "BORDER")
+    bLeft:SetPoint("TOPLEFT", 0, 0) bLeft:SetPoint("BOTTOMLEFT", 0, 0) bLeft:SetWidth(1)
+    local bRight = box:CreateTexture(nil, "BORDER")
+    bRight:SetPoint("TOPRIGHT", 0, 0) bRight:SetPoint("BOTTOMRIGHT", 0, 0) bRight:SetWidth(1)
+    local checkTex = box:CreateTexture(nil, "OVERLAY")
+    checkTex:SetPoint("TOPLEFT", box, "TOPLEFT", -2, 2)
+    checkTex:SetPoint("BOTTOMRIGHT", box, "BOTTOMRIGHT", 2, -2)
+    checkTex:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+    checkTex:Hide()
+    cb.boxBorders = { bTop, bBot, bLeft, bRight }
+    cb.checkTex = checkTex
+
+    local fs = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetPoint("LEFT", box, "RIGHT", 6, 0)
+    fs:SetPoint("RIGHT", cb, "RIGHT", 0, 0)
+    fs:SetJustifyH("LEFT")
+    cb.text = fs
+    cb.rowIdx = i
+    cb:SetScript("OnClick", function(self)
+      if not GL.db or not UI.currentStepKey then return end
+      GL.db.stepChecks = type(GL.db.stepChecks) == "table" and GL.db.stepChecks or {}
+      GL.db.stepChecks[UI.currentStepKey] = type(GL.db.stepChecks[UI.currentStepKey]) == "table" and GL.db.stepChecks[UI.currentStepKey] or {}
+      local stbl = GL.db.stepChecks[UI.currentStepKey]
+      stbl[self.rowIdx] = not stbl[self.rowIdx]
+      -- Stamp last-used time so pruning drops the oldest steps, not arbitrary pairs() order.
+      stbl._ts = (tonumber(GL.db.stepCheckClock) or 0) + 1
+      GL.db.stepCheckClock = stbl._ts
+      local keys, nKeys = {}, 0
+      for k, v in pairs(GL.db.stepChecks) do
+        nKeys = nKeys + 1
+        keys[nKeys] = { k = k, ts = (type(v) == "table" and tonumber(v._ts)) or 0 }
+      end
+      if nKeys > 50 then
+        table.sort(keys, function(a, b) return a.ts < b.ts end)
+        local left = nKeys
+        for ki = 1, #keys do
+          if left <= 40 then break end
+          if keys[ki].k ~= UI.currentStepKey then
+            GL.db.stepChecks[keys[ki].k] = nil
+            left = left - 1
+          end
+        end
+      end
+      UI.Update()
+    end)
+    cb:SetScript("OnEnter", function(self)
+      if GameTooltip then
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("LevelGuide Step", 0.94, 0.76, 0.32)
+        GameTooltip:AddLine("Click to check/uncheck this step.", 1, 1, 1)
+        if UI.step and UI.step.unverified then
+          GameTooltip:AddLine("Status: UNVERIFIED (Forever 1.60.1 class quest/NPC not live-confirmed)", 1, 0.55, 0.25)
+        else
+          local srcTag = (GL.data and GL.data.tag) or "UNVERIFIED"
+          GameTooltip:AddLine("Status: " .. tostring(srcTag) .. " (verify in live 1.60.1 client)", 1, 0.68, 0.25)
+        end
+        GameTooltip:Show()
+      end
+    end)
+    cb:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+    cb:Hide()
+    f.stepChecks[i] = cb
+  end
+
   f.body = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   f.body:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
   f.body:SetJustifyH("LEFT") f.body:SetJustifyV("TOP")
@@ -434,36 +526,40 @@ function UI.Create()
   f.barText:SetPoint("CENTER", 0, 0)
 
   -- Bottom Guide action bar
-  f.skip = mkbtn(f, "Skip", 44, 22)
+  f.skip = mkbtn(f, "Skip", 38, 22)
   f.skip:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 10, 10)
   f.skip:SetScript("OnClick", function() GL.CmdSkip() end)
 
-  f.pin = mkbtn(f, "Pin", 38, 22)
-  f.pin:SetPoint("LEFT", f.skip, "RIGHT", 5, 0)
+  f.ignoreBtn = mkbtn(f, "Ignore", 46, 22)
+  f.ignoreBtn:SetPoint("LEFT", f.skip, "RIGHT", 3, 0)
+  f.ignoreBtn:SetScript("OnClick", function() GL.CmdIgnore() end)
+
+  f.pin = mkbtn(f, "Pin", 34, 22)
+  f.pin:SetPoint("LEFT", f.ignoreBtn, "RIGHT", 3, 0)
   f.pin:SetScript("OnClick", function() GL.CmdPin() end)
 
-  f.resyncBtn = mkbtn(f, "Sync", 42, 22)
-  f.resyncBtn:SetPoint("LEFT", f.pin, "RIGHT", 4, 0)
+  f.resyncBtn = mkbtn(f, "Sync", 38, 22)
+  f.resyncBtn:SetPoint("LEFT", f.pin, "RIGHT", 3, 0)
   f.resyncBtn:SetScript("OnClick", function() GL.CmdRecalibrate() end)
 
-  f.speakBtn = mkbtn(f, "TTS", 38, 22)
-  f.speakBtn:SetPoint("LEFT", f.resyncBtn, "RIGHT", 4, 0)
+  f.speakBtn = mkbtn(f, "TTS", 34, 22)
+  f.speakBtn:SetPoint("LEFT", f.resyncBtn, "RIGHT", 3, 0)
   f.speakBtn:SetScript("OnClick", function() GL.CmdSpeak() end)
 
-  f.chainBtn = mkbtn(f, "Chain", 46, 22)
-  f.chainBtn:SetPoint("LEFT", f.speakBtn, "RIGHT", 5, 0)
+  f.chainBtn = mkbtn(f, "Chain", 42, 22)
+  f.chainBtn:SetPoint("LEFT", f.speakBtn, "RIGHT", 3, 0)
   f.chainBtn:SetScript("OnClick", function() GL.CmdChain() end)
 
-  f.mapBtn = mkbtn(f, "Map", 38, 22)
-  f.mapBtn:SetPoint("LEFT", f.chainBtn, "RIGHT", 5, 0)
+  f.mapBtn = mkbtn(f, "Map", 34, 22)
+  f.mapBtn:SetPoint("LEFT", f.chainBtn, "RIGHT", 3, 0)
   f.mapBtn:SetScript("OnClick", function() GL.CmdMap() end)
 
-  f.prevBtn = mkbtn(f, "Prev", 40, 22)
-  f.prevBtn:SetPoint("LEFT", f.mapBtn, "RIGHT", 4, 0)
-  f.prevBtn:SetScript("OnClick", function() GL.CmdHistory() end)
+  f.prevBtn = mkbtn(f, "Prev", 36, 22)
+  f.prevBtn:SetPoint("LEFT", f.mapBtn, "RIGHT", 3, 0)
+  f.prevBtn:SetScript("OnClick", function() GL.CmdBack() end)
 
-  f.splitsBtn = mkbtn(f, "Splits", 44, 22)
-  f.splitsBtn:SetPoint("LEFT", f.prevBtn, "RIGHT", 4, 0)
+  f.splitsBtn = mkbtn(f, "Splits", 42, 22)
+  f.splitsBtn:SetPoint("LEFT", f.prevBtn, "RIGHT", 3, 0)
   f.splitsBtn:SetScript("OnClick", function() GL.CmdSplits() end)
 
   f.bugBtn = mkbtn(f, "Bug", 36, 22)
@@ -614,7 +710,7 @@ function UI.ShowTab(name)
   sh(f.profCycle, pr)
   sh(f.prevText, g) sh(f.nextText, g)
   sh(f.bar, g) sh(f.barTrack, g) sh(f.barText, g)
-  sh(f.skip, g) sh(f.pin, g) sh(f.resyncBtn, g) sh(f.speakBtn, g) sh(f.chainBtn, g) sh(f.mapBtn, g) sh(f.prevBtn, g) sh(f.splitsBtn, g) sh(f.bugBtn, g)
+  sh(f.skip, g) sh(f.ignoreBtn, g) sh(f.pin, g) sh(f.resyncBtn, g) sh(f.speakBtn, g) sh(f.chainBtn, g) sh(f.mapBtn, g) sh(f.prevBtn, g) sh(f.splitsBtn, g) sh(f.bugBtn, g)
   sh(f.modeBtn, s) sh(f.pinBtn, s) sh(f.voiceBtn, s) sh(f.voiceCycleBtn, s) sh(f.discBtn, s)
   sh(f.themeBtn, s) sh(f.lockBtn, s) sh(f.opacityBtn, s) sh(f.syncBtn, s) sh(f.resetBtn, s) sh(f.fontBtn, s) sh(f.clusterBtn, s) sh(f.profileText, s)
   sh(f.log, l) sh(f.copyLogBtn, l)
@@ -636,21 +732,54 @@ function UI.Update(step, prog, info)
   end
 
   if (GL.db and GL.db.settings.miniMode) and step then
-    local badge = (step.kind == "TURNIN") and "|cff55ff55[TURN IN]|r" or ((step.kind == "PICKUP") and "|cffffd100[PICK UP]|r" or "|cff55ccff[DO]|r")
+    local badge = (step.kind == "TURNIN") and "|cff55ff55[TURN IN]|r" or ((step.kind == "PICKUP") and "|cffffd100[PICK UP]|r" or ((step.kind == "CLASS") and "|cffc77dff[CLASS]|r" or "|cff55ccff[DO]|r"))
     f.miniLine:SetText(badge .. " " .. tostring(step.where or (step.lines and step.lines[1]) or ""))
     f.bar:SetValue(prog or 0)
     f.barText:SetText("Lv " .. tostring(step.level) .. " (" .. string.format("%.0f", (prog or 0) * 100) .. "%)" .. xpSuffix)
     return
   end
 
+  if f.stepChecks then
+    for i = 1, #f.stepChecks do f.stepChecks[i]:Hide() end
+  end
+  if f.body and f.scrollContent then
+    f.body:ClearAllPoints()
+    f.body:SetPoint("TOPLEFT", f.scrollContent, "TOPLEFT", 0, 0)
+  end
+
   if UI.tab == "Guide" and step then
-    local badge = (step.kind == "TURNIN") and "|cff33e07a[TURN IN]|r " or ((step.kind == "PICKUP") and "|cfff0c252[PICK UP]|r " or "|cff55bbff[OBJECTIVES]|r ")
+    local badge = (step.kind == "TURNIN") and "|cff33e07a[TURN IN]|r " or ((step.kind == "PICKUP") and "|cfff0c252[PICK UP]|r " or ((step.kind == "CLASS") and "|cffc77dff[CLASS]|r " or "|cff55bbff[OBJECTIVES]|r "))
     f.header:SetText(badge .. tostring(step.header or "") .. (step.hubSummary and ("  |cff888888(" .. step.hubSummary .. ")|r") or ""))
+    local stepKey = tostring(step.kind) .. ":" .. tostring(step.ids and step.ids[1] or step.header)
+    UI.currentStepKey = stepKey
+    local checked = (GL.db and GL.db.stepChecks and GL.db.stepChecks[stepKey]) or {}
+    local shownRows = 0
+    if step.walkthrough and #step.walkthrough > 0 and f.stepChecks then
+      for i = 1, #f.stepChecks do
+        local cb = f.stepChecks[i]
+        local line = step.walkthrough[i]
+        if line then
+          shownRows = i
+          local isDone = checked[i] and true or false
+          if cb.checkTex then
+            if isDone then cb.checkTex:Show() else cb.checkTex:Hide() end
+          end
+          if cb.boxBorders then
+            local br, bg, bb = isDone and 0.20 or 0.94, isDone and 0.88 or 0.76, isDone and 0.48 or 0.32
+            for _, edge in ipairs(cb.boxBorders) do edge:SetColorTexture(br, bg, bb, 0.95) end
+          end
+          local col = isDone and "|cff777777" or "|cffffffff"
+          cb.text:SetText(col .. line .. "|r")
+          cb:Show()
+        end
+      end
+    end
+    if shownRows > 0 then
+      f.body:ClearAllPoints()
+      f.body:SetPoint("TOPLEFT", f.scrollContent, "TOPLEFT", 0, -(shownRows * 21 + 6))
+    end
     local out = {}
-    if step.walkthrough and #step.walkthrough > 0 then
-      table.insert(out, "|cfff0c252Step-by-Step:|r")
-      for _, w in ipairs(step.walkthrough) do table.insert(out, w) end
-    else
+    if shownRows == 0 then
       if step.where then table.insert(out, "|cff7ec8ff" .. step.where .. "|r") end
       for _, l in ipairs(step.lines or {}) do table.insert(out, l) end
     end

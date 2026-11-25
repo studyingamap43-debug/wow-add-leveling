@@ -13,6 +13,8 @@ GL.posAccum = 0
 GL.timerAccum = 0
 GL.lastLevel = nil
 GL.lastPinnedKey = nil
+GL.stepStack = {}
+GL.pinnedBackStep = nil
 
 local EVENTS = {
   "PLAYER_ENTERING_WORLD", "QUEST_LOG_UPDATE", "QUEST_ACCEPTED", "QUEST_TURNED_IN",
@@ -21,6 +23,8 @@ local EVENTS = {
   "PLAYER_XP_UPDATE", "PLAYER_DEAD", "PLAYER_UNGHOST", "PLAYER_ALIVE",
   "BAG_UPDATE_DELAYED", "BANKFRAME_OPENED", "UPDATE_INVENTORY_DURABILITY",
   "VIGNETTE_MINIMAP_UPDATED", "UPDATE_MOUSEOVER_UNIT", "UNIT_SPELLCAST_SUCCEEDED",
+  "PLAYER_REGEN_ENABLED", "QUEST_DETAIL", "QUEST_PROGRESS",
+  "QUEST_GREETING", "GOSSIP_SHOW",
 }
 if frame then
   for _, e in ipairs(EVENTS) do pcall(frame.RegisterEvent, frame, e) end
@@ -138,6 +142,32 @@ function GL.Refresh()
   if inInst then
     table.insert(step.advisories, "Inside instance — switch to Dungeons tab; outdoor auto-pin paused.")
   end
+  if GL.Safety then
+    local warns = GL.Safety.GetWarnings(step, ctx)
+    for _, line in ipairs(warns) do table.insert(step.advisories, line) end
+  end
+  if GL.PathInfo and GL.profile and step.kind ~= "CLASS" then
+    local cAdv = GL.PathInfo.GetActiveClassAdvisory(GL.profile.classToken, level)
+    if cAdv then table.insert(step.advisories, cAdv) end
+  end
+  if GL.Engine and GL.Engine.OptimizeQuestLog then
+    local opt = GL.Engine.OptimizeQuestLog(GL.state, GL.db, ctx)
+    if opt and opt.nearCap then
+      table.insert(step.advisories, string.format(
+        "Quest Log Optimizer (%d/%d): %d grey, %d ready turn-in(s), %d off-zone/route — /lg optimize",
+        opt.logCount, opt.maxQuests, #opt.grey, #opt.turnIns, #opt.offRoute
+      ))
+    end
+  end
+  if GL.Fallback and GL.profile and not inInst then
+    local dg = GL.Fallback.GetPromptDungeon(level, GL.profile.faction, GL.db and GL.db.skippedDungeons)
+    if dg then
+      GL._promptDungeonName = dg.name
+      table.insert(step.advisories, string.format("Dungeon Ready: %s (Lv %d-%d, %s) — /lg skipdungeon to dismiss [UNVERIFIED]", dg.name, dg.minL, dg.maxL, dg.zone))
+    else
+      GL._promptDungeonName = nil
+    end
+  end
   if GL.Reminders then
     local rem = GL.Reminders.BuildAdvisories(step, ctx)
     for _, line in ipairs(rem) do table.insert(step.advisories, line) end
@@ -146,31 +176,44 @@ function GL.Refresh()
     table.insert(step.advisories, "Tip: Check your Spellbook -> What's Training? tab for new spells.")
   end
 
+  if GL.pinnedBackStep then
+    step = GL.pinnedBackStep
+  else
+    local prevStep = GL.step
+    local prevKey = prevStep and (tostring(prevStep.kind) .. ":" .. tostring(prevStep.ids and prevStep.ids[1] or prevStep.header)) or nil
+    local newKey = tostring(step.kind) .. ":" .. tostring(step.ids and step.ids[1] or step.header)
+    if prevStep and prevStep.kind ~= "NONE" and prevKey and prevKey ~= newKey then
+      GL.stepStack = type(GL.stepStack) == "table" and GL.stepStack or {}
+      GL.stepStack[#GL.stepStack + 1] = prevStep
+      while #GL.stepStack > 15 do table.remove(GL.stepStack, 1) end
+    end
+  end
   GL.step = step
   GL.lastCtx = ctx
   local stepKey = tostring(step.kind) .. ":" .. tostring(step.ids and step.ids[1] or step.header)
   if GL.Timer then GL.Timer.OnStepChanged(stepKey) end
   if GL.Voice and GL.ready then GL.Voice.AnnounceStep(step, false) end
 
-  -- Questie spawn bridge: if on an OBJECTIVE step and Questie is loaded, aim Arrow/Trail at real mob spawns!
-  if step.kind == "OBJECTIVE" and step.ids and step.ids[1] and GL.Integrations and GL.Integrations.GetQuestieObjectiveTarget then
+  -- First-class QuestieBridge: aim Arrow, MinimapTrail, WorldMapOverlay & TomTom at closest live QuestieDB spawn!
+  if step.kind == "OBJECTIVE" and step.ids and step.ids[1] and GL.QuestieBridge then
     local pMap = C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or nil
-    local spName, _, sx, sy = GL.Integrations.GetQuestieObjectiveTarget(step.ids[1], pMap)
-    if spName and sx and sy then
-      step.target = { spName, step.target and step.target[2] or 0, sx, sy }
-      step.targetZone = zone or step.targetZone
+    local loc = GL.QuestieBridge.GetObjectiveLocation(step.ids[1], pMap, px, py)
+    if loc and loc.xPercent and loc.yPercent then
+      step.target = { loc.label or "Objective", step.target and step.target[2] or 0, loc.xPercent, loc.yPercent }
+      step.targetZone = loc.zoneName or zone or step.targetZone
+      step.targetMapId = loc.uiMapID
       step.targetIsTurnIn = false
-      step.where = string.format("Questie Spawn: %s (%.1f, %.1f) in %s", spName, sx, sy, tostring(step.targetZone or "?"))
+      step.where = string.format("Nearest Spawn (%s): %s (%.1f, %.1f) in %s", tostring(loc.source), tostring(loc.label), loc.xPercent, loc.yPercent, tostring(step.targetZone))
     end
   end
 
   -- Auto-pin only outdoors and when WorldMapFrame is not actively being browsed
   local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
   if not inInst and not mapOpen and GL.db and GL.db.settings.autoPin and step.target and GL.Waypoint then
-    local pinKey = tostring(step.target[1]) .. ":" .. tostring(step.target[2]) .. ":" .. tostring(step.target[3])
+    local pinKey = string.format("%s:%s:%.1f:%.1f", tostring(step.target[1]), tostring(step.targetZone or step.target[2]), tonumber(step.target[3] or 0), tonumber(step.target[4] or 0))
     if pinKey ~= GL.lastPinnedKey then
       GL.lastPinnedKey = pinKey
-      GL.Waypoint.SetForTarget(step.target, step.targetZone, step.header)
+      GL.Waypoint.SetForTarget(step.target, step.targetZone, step.header, step.targetMapId)
     end
   end
 
@@ -182,6 +225,7 @@ function GL.Refresh()
     "Profile: %s\nData: %s only (LoD) | Quests: %d | Memory: %.1f KB\nFlight Paths: %d | Forever Discoveries: %d%s",
     GL.profile.key, tostring(GL.loadedFaction), GL.state.n, GL.Compat.GetMemoryKB(), fpCount, discCount, bridgeInfo
   )
+  if GL.ActionBar then GL.Safe("ActionBar.Update", GL.ActionBar.UpdateForStep, step) end
   GL.UI.Update(step, prog, info)
   GL.dirty = false
 end
@@ -194,11 +238,13 @@ function GL.OnEvent(event, a1, a2, a3)
     GL.readyAt = GetTime and (GetTime() + 2) or 0
     GL.dirty = true
   elseif event == "QUEST_ACCEPTED" then
+    GL.pinnedBackStep = nil
     local qid = (type(a1) == "number" and a1 > 0) and a1 or (type(a2) == "number" and a2 > 0 and a2 or nil)
     if qid and GL.Discoveries then GL.Safe("DiscoverAccept", GL.Discoveries.RecordQuest, qid, "ACCEPT") end
     GL.Safe("ScanLog", GL.ScanLog)
     GL.dirty = true
   elseif event == "QUEST_TURNED_IN" then
+    GL.pinnedBackStep = nil
     if type(a1) == "number" then
       if GL.Discoveries then GL.Safe("DiscoverTurnIn", GL.Discoveries.RecordQuest, a1, "TURNIN") end
       if GL.state and GL.db then
@@ -209,11 +255,22 @@ function GL.OnEvent(event, a1, a2, a3)
     end
     if GL.Rewards then GL.Rewards.lastAdvice = nil end
     GL.dirty = true
+  elseif event == "PLAYER_REGEN_ENABLED" then
+    if GL.ActionBar then GL.Safe("ActionBar.Apply", GL.ActionBar.ApplyPending) end
+  elseif event == "QUEST_DETAIL" then
+    if GL.AutoQuest then GL.Safe("AutoQuest.Detail", GL.AutoQuest.OnQuestDetail) end
+  elseif event == "QUEST_PROGRESS" then
+    if GL.AutoQuest then GL.Safe("AutoQuest.Progress", GL.AutoQuest.OnQuestProgress) end
+  elseif event == "QUEST_GREETING" then
+    if GL.AutoQuest then GL.Safe("AutoQuest.Greeting", GL.AutoQuest.OnQuestGreeting) end
+  elseif event == "GOSSIP_SHOW" then
+    if GL.AutoQuest then GL.Safe("AutoQuest.Gossip", GL.AutoQuest.OnGossipShow) end
   elseif event == "QUEST_COMPLETE" then
     if GL.Rewards then
       local advice = GL.Safe("Rewards", GL.Rewards.EvaluateChoices)
       if advice then GL.Print(advice) GL.dirty = true end
     end
+    if GL.AutoQuest then GL.Safe("AutoQuest.Complete", GL.AutoQuest.OnQuestComplete) end
   elseif event == "TAXIMAP_OPENED" then
     if GL.Travel then GL.Safe("ScanFP", GL.Travel.ScanFlightPaths) end
   elseif event == "VIGNETTE_MINIMAP_UPDATED" and GL.RareAlert then
@@ -222,16 +279,25 @@ function GL.OnEvent(event, a1, a2, a3)
     GL.Safe("RareMouseover", GL.RareAlert.OnMouseoverUnit)
   elseif event == "UNIT_SPELLCAST_SUCCEEDED" and a1 == "player" and GL.GatherNodes then
     local sid = (type(a3) == "number" and a3) or (type(a2) == "number" and a2) or nil
-    if sid == 2366 then
-      GL.Safe("RecHerb", GL.GatherNodes.RecordCurrentNode, "HERB", "Herb")
-    elseif sid == 2575 then
-      GL.Safe("RecMine", GL.GatherNodes.RecordCurrentNode, "MINE", "Mining Vein")
-    elseif sid and C_Spell and C_Spell.GetSpellName then
-      local spellName = C_Spell.GetSpellName(sid)
-      if spellName then
-        local lo = string.lower(tostring(spellName))
-        if string.find(lo, "herb") then GL.Safe("RecHerb", GL.GatherNodes.RecordCurrentNode, "HERB", "Herb")
-        elseif string.find(lo, "mining") then GL.Safe("RecMine", GL.GatherNodes.RecordCurrentNode, "MINE", "Mining Vein") end
+    -- 2366/2575 are rank-1 gather spells. Skip "Find Herbs" (2383) and "Find Minerals" (2580).
+    if sid ~= 2383 and sid ~= 2580 then
+      if sid == 2366 then
+        GL.Safe("RecHerb", GL.GatherNodes.RecordCurrentNode, "HERB", "Herb")
+      elseif sid == 2575 then
+        GL.Safe("RecMine", GL.GatherNodes.RecordCurrentNode, "MINE", "Mining Vein")
+      elseif sid and C_Spell and C_Spell.GetSpellName then
+        local okSN, spellName = pcall(C_Spell.GetSpellName, sid)
+        spellName = okSN and spellName or nil
+        if spellName then
+          local lo = string.lower(tostring(spellName))
+          if lo ~= "find herbs" and lo ~= "find minerals" then
+            if string.find(lo, "herb gathering", 1, true) or lo == "herbalism" then
+              GL.Safe("RecHerb", GL.GatherNodes.RecordCurrentNode, "HERB", "Herb")
+            elseif string.find(lo, "mining", 1, true) and not string.find(lo, "smelt", 1, true) then
+              GL.Safe("RecMine", GL.GatherNodes.RecordCurrentNode, "MINE", "Mining Vein")
+            end
+          end
+        end
       end
     end
   elseif event == "PLAYER_LEVEL_UP" then
@@ -273,7 +339,6 @@ if frame then
     local f = GL.UI and GL.UI.frame
     if f and f:IsVisible() and GL.posAccum >= 2 then
       GL.posAccum = 0
-GL.timerAccum = 0
       GL.dirty = true
     end
     if GL.dirty and GL.accum >= 0.5 then
@@ -284,8 +349,24 @@ GL.timerAccum = 0
 end
 
 -- ---------- commands ----------
+local function warnChainBlocks(actionLabel, ids)
+  if not GL.Engine or not GL.Engine.CountBlockedFollowUps then return end
+  local blocked, sample = GL.Engine.CountBlockedFollowUps(GL.state, GL.db, ids)
+  if blocked > 0 then
+    local ex = (#sample > 0) and (" (" .. table.concat(sample, ", ") .. ((blocked > #sample) and ", ..." or "") .. ")") or ""
+    GL.Print(string.format("|cffffaa00Chain Warning:|r %s blocks %d follow-up quest(s)%s.", actionLabel, blocked, ex))
+  end
+end
+
 function GL.CmdSkip()
+  if GL.pinnedBackStep then
+    GL.pinnedBackStep = nil
+    GL.Print("Returned to live guide step.")
+    GL.Refresh()
+    return
+  end
   if not GL.state or not GL.step or not GL.step.ids then GL.Print("Nothing to skip.") return end
+  warnChainBlocks("Skipping this step", GL.step.ids)
   GL.db.lastSkipped = {}
   for _, id in ipairs(GL.step.ids) do
     for _, sid in ipairs(GL.Engine.Siblings(GL.state, id)) do
@@ -294,8 +375,64 @@ function GL.CmdSkip()
     end
   end
   GL.RecordStepHistory("[SKIPPED] " .. tostring(GL.step.header or "Step"))
-  GL.Print("Skipped " .. #GL.step.ids .. " quest(s). /guide unskip to restore.")
+  GL.Print("Skipped " .. #GL.step.ids .. " step/quest(s). /lg undo or /lg unskip to restore.")
   GL.Refresh()
+end
+
+function GL.CmdIgnore()
+  GL.pinnedBackStep = nil
+  if not GL.db or not GL.state or not GL.step or not GL.step.ids or #GL.step.ids == 0 then
+    GL.Print("Nothing to ignore.")
+    return
+  end
+  warnChainBlocks("Ignoring this step", GL.step.ids)
+  GL.db.ignoredQuests = type(GL.db.ignoredQuests) == "table" and GL.db.ignoredQuests or {}
+  local added = {}
+  for _, id in ipairs(GL.step.ids) do
+    GL.db.ignoredQuests[id] = true
+    added[#added + 1] = tostring(id)
+  end
+  GL.RecordStepHistory("[IGNORED] " .. tostring(GL.step.header or "Step"))
+  GL.Print("Ignored " .. table.concat(added, ", ") .. ". Use /lg unignore <id> or /lg unignore all to restore.")
+  GL.Refresh()
+end
+
+function GL.CmdUnignore(arg)
+  if not GL.db then return end
+  GL.db.ignoredQuests = type(GL.db.ignoredQuests) == "table" and GL.db.ignoredQuests or {}
+  if arg == "all" then
+    GL.db.ignoredQuests = {}
+    GL.Print("Cleared all ignored quests/steps for this character.")
+    GL.Refresh()
+    return
+  end
+  if not arg or arg == "" then
+    local list = {}
+    for k in pairs(GL.db.ignoredQuests) do list[#list + 1] = tostring(k) end
+    table.sort(list)
+    if #list == 0 then
+      GL.Print("No ignored quests/steps. Usage: /lg unignore <id> or /lg unignore all")
+    else
+      GL.Print("Ignored (" .. tostring(#list) .. "): " .. table.concat(list, ", ") .. " — /lg unignore <id> or /lg unignore all")
+    end
+    return
+  end
+  local numId = tonumber(arg)
+  if numId and GL.db.ignoredQuests[numId] then
+    GL.db.ignoredQuests[numId] = nil
+    GL.Print("Unignored quest ID " .. tostring(numId) .. ".")
+    GL.Refresh()
+    return
+  end
+  local up = string.upper(arg)
+  if GL.db.ignoredQuests[arg] or GL.db.ignoredQuests[up] then
+    GL.db.ignoredQuests[arg] = nil
+    GL.db.ignoredQuests[up] = nil
+    GL.Print("Unignored " .. tostring(arg) .. ".")
+    GL.Refresh()
+    return
+  end
+  GL.Print("ID not found in ignoredQuests: " .. tostring(arg))
 end
 
 function GL.CmdChain()
@@ -305,7 +442,7 @@ end
 
 function GL.CmdPin()
   if not GL.step or not GL.step.target then GL.Print("No waypoint target for current step.") return end
-  local _, msg = GL.Waypoint.SetForTarget(GL.step.target, GL.step.targetZone, GL.step.header)
+  local _, msg = GL.Waypoint.SetForTarget(GL.step.target, GL.step.targetZone, GL.step.header, GL.step.targetMapId)
   GL.Print(msg)
 end
 
@@ -429,6 +566,22 @@ function GL.CmdCluster()
   GL.Refresh()
 end
 
+function GL.CmdBack()
+  if type(GL.stepStack) == "table" and #GL.stepStack > 0 then
+    local prev = table.remove(GL.stepStack)
+    GL.pinnedBackStep = prev
+    GL.lastPinnedKey = nil
+    GL.Print("Stepped back to: [" .. tostring(prev.kind or "?") .. "] " .. tostring(prev.header or "-") .. " (click Skip or Sync to return to live step).")
+    GL.Refresh()
+    return
+  end
+  if GL.db and type(GL.db.lastSkipped) == "table" and #GL.db.lastSkipped > 0 then
+    GL.CmdUndo()
+    return
+  end
+  GL.Print("No previous step in session history.")
+end
+
 function GL.CmdHistory()
   if GL.UI and GL.ExportStepHistory then
     GL.UI.ShowBugReport(GL.ExportStepHistory(), "LevelGuide — Previous Steps History")
@@ -468,6 +621,88 @@ function GL.CmdClass()
     local lv = (UnitLevel and UnitLevel("player")) or 1
     GL.UI.ShowBugReport(GL.PathInfo.ExportClassGuide(cls, lv), "LevelGuide — Class Chains & Milestones (" .. cls .. ")")
   end
+end
+
+function GL.CmdSkipDungeon()
+  if not GL.db or not GL._promptDungeonName then
+    GL.Print("No active dungeon prompt to skip.")
+    return
+  end
+  GL.db.skippedDungeons = type(GL.db.skippedDungeons) == "table" and GL.db.skippedDungeons or {}
+  GL.db.skippedDungeons[GL._promptDungeonName] = true
+  GL.Print("Skipped dungeon prompt: " .. tostring(GL._promptDungeonName))
+  GL.Refresh()
+end
+
+function GL.CmdPace()
+  if GL.PaceGuide and GL.UI then
+    local lv = (UnitLevel and UnitLevel("player")) or 1
+    local fac = (GL.profile and GL.profile.faction) or "Alliance"
+    GL.UI.ShowBugReport(GL.PaceGuide.ExportGuide(lv, fac), "WoW: Forever 1.60.1 — Optimal 1-60 Pace Checklist")
+  end
+end
+
+function GL.CmdHC(arg)
+  if not GL.db then return end
+  if arg == "on" then GL.db.settings.hcWarnings = true
+  elseif arg == "off" then GL.db.settings.hcWarnings = false
+  else GL.db.settings.hcWarnings = not (GL.db.settings.hcWarnings ~= false) end
+  GL.Print("Hardcore / Danger Pull Warnings: " .. (GL.db.settings.hcWarnings and "ON" or "OFF"))
+  GL.Refresh()
+end
+
+function GL.CmdAuto(arg)
+  if not GL.db then return end
+  if arg == "on" then GL.db.settings.autoQuest = true
+  elseif arg == "off" then GL.db.settings.autoQuest = false
+  else GL.db.settings.autoQuest = not GL.db.settings.autoQuest end
+  GL.Print("Auto-Accept / Single-Reward Auto-Turn-In: " .. (GL.db.settings.autoQuest and "ON (hold Shift to pause)" or "OFF"))
+end
+
+function GL.CmdCleanup()
+  if not GL.state or not GL.Engine or not GL.Engine.OptimizeQuestLog then return end
+  GL.ScanLog()
+  local lv = (UnitLevel and UnitLevel("player")) or 1
+  local _, zone = GL.Compat.ReadPosition()
+  local opt = GL.Engine.OptimizeQuestLog(GL.state, GL.db, {
+    level = lv, zone = zone, logCount = GL.lastLogCount or 0, maxQuests = GL.lastMaxQuests or 20,
+  })
+  GL.Print(string.format("Quest Log Optimizer (%d/%d quests):", opt.logCount, opt.maxQuests))
+  GL.Print("  Grey (" .. tostring(#opt.grey) .. "): " .. (#opt.grey > 0 and table.concat(opt.grey, ", ") or "none"))
+  GL.Print("  Ready Turn-Ins (" .. tostring(#opt.turnIns) .. "): " .. (#opt.turnIns > 0 and table.concat(opt.turnIns, ", ") or "none"))
+  GL.Print("  Off-Zone / Off-Route (" .. tostring(#opt.offRoute) .. "): " .. (#opt.offRoute > 0 and table.concat(opt.offRoute, ", ") or "none"))
+end
+
+function GL.CmdFeedback(note)
+  local mapId, zone, px, py
+  if GL.Compat and GL.Compat.ReadPosition then mapId, zone, px, py = GL.Compat.ReadPosition() end
+  local s = GL.step
+  local report = table.concat({
+    "=== LevelGuide Step Feedback ===",
+    "Version: " .. tostring(GL.version) .. " | Client: " .. (GL.Compat and GL.Compat.GetBuildString() or "?"),
+    "Char: " .. tostring(GL.profile and GL.profile.key or "?") .. " Lv " .. tostring(UnitLevel and UnitLevel("player") or "?"),
+    string.format("Pos: %s (map=%s, %.1f, %.1f)", tostring(zone or "?"), tostring(mapId or "?"), tonumber(px or 0), tonumber(py or 0)),
+    "Step: [" .. tostring(s and s.kind or "NONE") .. "] " .. tostring(s and s.header or "-") .. " | QIDs: " .. (s and s.ids and table.concat(s.ids, ",") or "none"),
+    "Note: " .. ((note and note ~= "") and note or "(describe what was wrong with this step)"),
+  }, "\n")
+  if GL.UI and GL.UI.ShowBugReport then
+    GL.UI.ShowBugReport(report, "LevelGuide — Step Feedback (Ctrl+C)")
+  end
+end
+
+function GL.CmdQuestie(arg)
+  if not GL.db then return end
+  if arg == "on" then GL.db.settings.useQuestieSpawns = true
+  elseif arg == "off" then GL.db.settings.useQuestieSpawns = false
+  elseif arg == "status" then
+    GL.Print(GL.QuestieBridge and GL.QuestieBridge.GetStatusString() or "QuestieBridge unavailable")
+    return
+  else
+    GL.db.settings.useQuestieSpawns = not (GL.db.settings.useQuestieSpawns ~= false)
+  end
+  GL.Print("Questie live spawn bridge: " .. (GL.db.settings.useQuestieSpawns and "ON" or "OFF"))
+  if GL.QuestieBridge then GL.Print(GL.QuestieBridge.GetStatusString()) end
+  GL.Refresh()
 end
 
 function GL.CmdTomTom()
@@ -529,7 +764,7 @@ end
 
 function GL.CmdReset()
   if not GL.db then return end
-  GL.db.done = {} GL.db.skipped = {} GL.db.synced = nil
+  GL.db.done = {} GL.db.skipped = {} GL.db.ignoredQuests = {} GL.db.synced = nil
   if GL.state then GL.state.prev = nil end
   GL.Print("Progress reset for this character.")
   if GL.state then GL.Refresh() end
@@ -537,48 +772,94 @@ end
 
 function GL.CmdScan()
   if not GL.state then GL.Print("LevelGuide data not loaded yet.") return end
-  GL.Engine.SyncFromServer(GL.state, GL.db, GL.Compat.IsQuestCompleted)
+  GL.pinnedBackStep = nil
+  GL.state.prev = nil
+  local added, reopened = GL.Engine.SyncFromServer(GL.state, GL.db, GL.Compat.IsQuestCompleted)
   GL.ScanLog()
   local level = UnitLevel and UnitLevel("player") or 1
   local _, zone, px, py = GL.Compat.ReadPosition()
   local ctx = { level = level, zone = zone, px = px, py = py }
   local best = GL.Engine.ScanNearestArea(GL.state, GL.db, ctx)
   if not best then
-    GL.Print("Scan: No available quests found in your level window (check Dungeons / Grinding tab).")
+    GL.Refresh()
+    GL.Print(string.format("Scan (+%d done, %d reopened): No unaccepted quests found in your level window (check Dungeons / Grinding tab).", added or 0, reopened or 0))
     return
   end
+  if best.fromSkipped and GL.db and type(GL.db.skipped) == "table" then
+    for _, id in ipairs(best.ids) do GL.db.skipped[id] = nil end
+    GL.state._availKey = nil
+  end
+  GL.Refresh()
+  -- Pin AFTER Refresh and sync lastPinnedKey so autoPin does not clobber the Scan lock.
   if GL.Waypoint and GL.Waypoint.SetForTarget then
-    GL.Waypoint.SetForTarget(best.n, best.zone, "Nearest Area: " .. best.n[1])
+    GL.lastPinnedKey = string.format("%s:%s:%.1f:%.1f", tostring(best.n[1]), tostring(best.zone or best.n[2]), tonumber(best.n[3] or 0), tonumber(best.n[4] or 0))
+    GL.Waypoint.SetForTarget(best.n, best.zone, "Missed / Nearest Hub: " .. best.n[1])
+  end
+  -- If player has no active quests or wants to go back to a missed pickup, surface it on the HUD too.
+  if GL.step and GL.step.kind ~= "PICKUP" and best.ids and #best.ids > 0 then
+    local qNames = {}
+    for _, id in ipairs(best.ids) do
+      local q = GL.state.data and GL.state.data.quests and GL.state.data.quests[id]
+      if q and q.n then qNames[#qNames + 1] = "- " .. q.n .. " (" .. tostring(q.l or "?") .. ")" end
+    end
+    local scanStep = {
+      kind = "PICKUP",
+      header = "Missed / Nearest Hub (" .. tostring(#best.ids) .. ")",
+      lines = qNames,
+      walkthrough = {
+        string.format("1. Go to %s in %s (%.1f, %.1f).", tostring(best.n[1]), tostring(best.zone), tonumber(best.n[3] or 0), tonumber(best.n[4] or 0)),
+        "2. Accept: " .. table.concat(qNames, ", "),
+      },
+      target = best.n,
+      targetZone = best.zone,
+      where = string.format("%s in %s (%.1f, %.1f)", tostring(best.n[1]), tostring(best.zone), tonumber(best.n[3] or 0), tonumber(best.n[4] or 0)),
+      ids = best.ids,
+      level = level,
+      advisories = GL.step.advisories,
+      hubSummary = GL.step.hubSummary,
+      nextPreview = GL.step.header,
+    }
+    GL.step = scanStep
+    if GL.ActionBar then GL.Safe("ActionBar.Update", GL.ActionBar.UpdateForStep, scanStep) end
+    local prog = GL.Engine.Progress(level, UnitXP and UnitXP("player"), UnitXPMax and UnitXPMax("player"))
+    if GL.UI then GL.UI.Update(scanStep, prog) end
   end
   local distStr = best.sameZone and string.format("~%.0f map units away", best.distUnits or 0) or ("travel to " .. tostring(best.zone))
-  GL.Print(string.format("|cff55ff55Scan locked:|r %s in %s (%.1f, %.1f) — %s, %d quest(s) ready!",
-    tostring(best.n[1]), tostring(best.zone), best.n[3], best.n[4], distStr, #best.ids))
-  GL.Refresh()
+  local extra = (reopened and reopened > 0) and string.format(" (%d missed reopened)", reopened) or ""
+  GL.Print(string.format("|cff55ff55Scan locked:|r %s in %s (%.1f, %.1f) — %s, %d quest(s) ready%s!",
+    tostring(best.n[1]), tostring(best.zone), best.n[3], best.n[4], distStr, #best.ids, extra))
 end
 
 function GL.CmdRecalibrate()
+  GL.pinnedBackStep = nil
   if not GL.state then
     GL.inited = false
     GL.Init()
     return
   end
   GL.state.prev = nil
+  GL.state._availKey = nil
   GL.lastPinnedKey = nil
-  local synced = GL.Engine.SyncFromServer(GL.state, GL.db, GL.Compat.IsQuestCompleted)
+  local added, reopened = GL.Engine.SyncFromServer(GL.state, GL.db, GL.Compat.IsQuestCompleted)
   GL.ScanLog()
   GL.Refresh()
   if GL.step and GL.step.target and GL.Waypoint then
     GL.Waypoint.SetForTarget(GL.step.target, GL.step.targetZone, GL.step.header)
   end
-  GL.Print(string.format("Recalibrated quest log: +%d server-completed, %d active in log -> [%s] %s",
-    synced, GL.lastLogCount or 0, tostring(GL.step and GL.step.kind or "NONE"), tostring(GL.step and GL.step.header or "-")))
+  GL.Print(string.format("Synced to live guide position: +%d completed, %d missed reopened, %d in log -> [%s] %s",
+    added or 0, reopened or 0, GL.lastLogCount or 0, tostring(GL.step and GL.step.kind or "NONE"), tostring(GL.step and GL.step.header or "-")))
 end
 
 function GL.CmdSync()
   if not GL.state then return end
-  local c = GL.Engine.SyncFromServer(GL.state, GL.db, GL.Compat.IsQuestCompleted)
-  GL.Print("Synced " .. c .. " completed quest(s) from server (no level-based guessing).")
+  GL.pinnedBackStep = nil
+  GL.state.prev = nil
+  GL.state._availKey = nil
+  GL.lastPinnedKey = nil
+  local added, reopened = GL.Engine.SyncFromServer(GL.state, GL.db, GL.Compat.IsQuestCompleted)
+  GL.ScanLog()
   GL.Refresh()
+  GL.Print(string.format("Synced from server: +%d completed, %d missed/uncompleted reopened (no level-based guessing).", added or 0, reopened or 0))
 end
 
 function GL.CmdDebug()
@@ -596,7 +877,7 @@ function GL.CmdTest()
   local function chk(name, cond)
     if cond then ok = ok + 1 else fail = fail + 1 GL.Print("|cffff4444[FAIL]|r " .. name) end
   end
-  chk("LevelGuideDB v8 initialized", type(GL.db) == "table" and GL.db.version == 8)
+  chk("LevelGuideDB v13 initialized", type(GL.db) == "table" and GL.db.version == 13)
   chk("Only active faction data loaded", GL.profile and GL.loadedFaction == GL.profile.faction)
   chk("Validator ran with 0 fatal", GL.report and not GL.report.fatal)
   chk("Compat C_Map available", C_Map and C_Map.GetBestMapForUnit ~= nil)
@@ -634,17 +915,27 @@ SlashCmdList["LEVELGUIDE"] = function(msg)
     elseif cmd == "rare" then GL.CmdRare()
     elseif cmd == "class" then GL.CmdClass()
     elseif cmd == "tomtom" then GL.CmdTomTom()
+    elseif cmd == "questie" then GL.CmdQuestie(rest)
+    elseif cmd == "hc" then GL.CmdHC(rest)
+    elseif cmd == "pace" then GL.CmdPace()
+    elseif cmd == "skipdungeon" then GL.CmdSkipDungeon()
+    elseif cmd == "auto" then GL.CmdAuto(rest)
+    elseif cmd == "cleanup" or cmd == "optimize" then GL.CmdCleanup()
+    elseif cmd == "feedback" then GL.CmdFeedback(rest)
     elseif cmd == "way" then GL.CmdWay(rest)
     elseif cmd == "map" then GL.CmdMap()
     elseif cmd == "gather" then GL.CmdGather(rest)
     elseif cmd == "font" then GL.CmdFont(rest)
     elseif cmd == "cluster" then GL.CmdCluster()
-    elseif cmd == "prev" or cmd == "history" then GL.CmdHistory()
+    elseif cmd == "back" or cmd == "prev" then GL.CmdBack()
+    elseif cmd == "history" then GL.CmdHistory()
     elseif cmd == "undo" then GL.CmdUndo()
     elseif cmd == "export-ai" or cmd == "ai" then GL.CmdExportAI()
     elseif cmd == "pin" then GL.CmdPin()
     elseif cmd == "chain" then GL.CmdChain()
     elseif cmd == "skip" then GL.CmdSkip()
+    elseif cmd == "ignore" then GL.CmdIgnore()
+    elseif cmd == "unignore" then GL.CmdUnignore(rest)
     elseif cmd == "unskip" then if GL.db then GL.db.skipped = {} GL.Refresh() end
     elseif cmd == "mode" then GL.CmdMode(rest)
     elseif cmd == "sync" then GL.CmdSync()
@@ -655,6 +946,6 @@ SlashCmdList["LEVELGUIDE"] = function(msg)
     elseif cmd == "test" then GL.CmdTest()
     elseif cmd == "errors" then GL.UI.Create():Show() GL.UI.ShowTab("Log")
     elseif cmd == "reload" then GL.inited = false GL.state = nil GL.lastPinnedKey = nil GL.Init() GL.CmdRecalibrate()
-    else GL.Print("/guide [arrow|speak|voice|timer|splits|theme|mini|lock|stats|pin|chain|discoveries|skip|unskip|mode|sync|reset|debug|test]") end
+    else GL.Print("/lg [ignore|unignore|optimize|skip|undo|unskip|skipdungeon|arrow|speak|voice|timer|splits|theme|mini|lock|stats|pin|chain|class|mode|sync|reset|debug|test]") end
   end)
 end

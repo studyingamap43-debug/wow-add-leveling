@@ -22,12 +22,12 @@ end
 
 local function formatETA(yards)
   if not yards or yards <= 0 then return "" end
-  local spd = 7
-  if GetUnitSpeed and not (GL.Compat and GL.Compat.InCombat()) then
-    local okS, raw = pcall(GetUnitSpeed, "player")
-    if okS then spd = GL.Compat and GL.Compat.SafeNumber(raw, 7) or 7 end
+  local curSpd, runSpd = nil, nil
+  if GL.Compat and GL.Compat.PlayerSpeed then
+    curSpd, runSpd = GL.Compat.PlayerSpeed()
   end
-  if spd < 1 then spd = 7 end -- default run speed (~7 yd/s) when standing still
+  local spd = (curSpd and curSpd > 0.5) and curSpd or ((runSpd and runSpd > 0.5) and runSpd or nil)
+  if not spd then return "" end -- never fabricate an ETA when speed is unavailable or secret
   local sec = math.floor((yards / spd) + 0.5)
   if sec >= 3600 then return ">1h" end
   local m = math.floor(sec / 60)
@@ -184,8 +184,20 @@ function A.UpdateFrame()
   if tgt.sub and tgt.sub ~= "" then label = tgt.sub end
   f.title:SetText(string.sub(tostring(label), 1, 28))
 
-  local sameMap = (tgt.mapId and pMapId and tgt.mapId == pMapId)
-    or (tgt.zoneName and pZone and string.lower(tgt.zoneName) == string.lower(pZone))
+  local sameMap = false
+  if tgt.mapId and pMapId then
+    if tgt.mapId == pMapId then
+      sameMap = true
+    elseif GL.Compat and GL.Compat.ReadPositionOnMap then
+      local ox, oy = GL.Compat.ReadPositionOnMap(tgt.mapId)
+      if ox and oy then
+        px, py = ox, oy
+        sameMap = true
+      end
+    end
+  elseif (not tgt.mapId or not pMapId) and tgt.zoneName and pZone and string.lower(tgt.zoneName) == string.lower(pZone) then
+    sameMap = true
+  end
 
   if not sameMap or not px or not py then
     -- Cross-zone or indoors: steady sky-blue icon + zone direction
@@ -213,10 +225,11 @@ function A.UpdateFrame()
   -- Target bearing in WoW counter-clockwise-from-North convention:
   -- North (dx=0, dy<0) = 0, West (dx<0) = +pi/2, South (dy>0) = pi, East (dx>0) = -pi/2
   local bearing = math.atan2(-ydX, -ydY)
-  local facing = 0
-  if GetPlayerFacing then
-    local okF, rawF = pcall(GetPlayerFacing)
-    if okF then facing = GL.Compat and GL.Compat.SafeNumber(rawF, 0) or 0 end
+  local facing = GL.Compat and GL.Compat.PlayerFacing() or nil
+  if not facing then
+    f.tex:SetVertexColor(0.38, 0.65, 0.98, 1)
+    f.distTxt:SetText(string.format("|cffffffff%.0f yd|r", yards))
+    return
   end
   local rel = normalizeAngle(bearing - facing)
 

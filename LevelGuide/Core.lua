@@ -2,17 +2,20 @@
 -- Extended for WoW: Forever 1.60.1 (Interface 16001 / Lua 5.1) while preserving LevelGuideDB compatibility.
 LevelGuide = LevelGuide or {}
 local GL = LevelGuide
-GL.version = "1.0.1"
-GL.DBVERSION = 8
+GL.version = "1.2.9"
+GL.DBVERSION = 13
 GL.errors = GL.errors or {}
 GL.events = GL.events or {}
 GL.errPrinted = 0
 BINDING_HEADER_LEVELGUIDE = "LevelGuide"
 BINDING_NAME_LEVELGUIDE_TOGGLE = "Toggle LevelGuide Window"
-BINDING_NAME_LEVELGUIDE_SKIP = "Skip Current Step"
+BINDING_NAME_LEVELGUIDE_NEXT = "Next / Skip Step"
+BINDING_NAME_LEVELGUIDE_PREV = "Undo Last Skip"
+BINDING_NAME_LEVELGUIDE_SKIP = "Next / Skip Step (legacy name)"
 BINDING_NAME_LEVELGUIDE_PIN = "Pin Active Waypoint"
 BINDING_NAME_LEVELGUIDE_SPEAK = "Speak Current Step (TTS)"
 BINDING_NAME_LEVELGUIDE_RESYNC = "Recalibrate Quest Log"
+_G["BINDING_NAME_CLICK LevelGuideTargetButton:LeftButton"] = "Target Active Quest Mob / NPC"
 
 local function strip(s) return tostring(s) end
 
@@ -78,12 +81,21 @@ GL.FACTIONMASK = { Alliance = 77, Horde = 178 }
 -- Identify THIS character. Everything else keys off this, so other sides/races/classes are never loaded.
 function GL.DetectProfile()
   local faction = UnitFactionGroup and UnitFactionGroup("player")
-  local race, raceTok
-  if UnitRace then race, raceTok = UnitRace("player") end
+  local race, raceTok, raceID
+  if UnitRace then race, raceTok, raceID = UnitRace("player") end
   local class, tok
   if UnitClass then class, tok = UnitClass("player") end
-  local p = { race = race or "?", raceToken = raceTok or race or "?", class = class or "?", classToken = tok or "?" }
+  local p = { race = race or "?", raceToken = raceTok or race or "?", raceID = raceID, class = class or "?", classToken = tok or "?" }
   p.raceBit = (race and GL.RACEBITS[race]) or (raceTok and GL.RACEBITS[raceTok]) or nil
+  local tokLo = string.lower(tostring(raceTok or ""))
+  local raceLo = string.lower(tostring(race or ""))
+  -- Token/name only. raceID>8 was an invented heuristic and can false-flag unknown IDs.
+  p.isSkyborne = (string.find(tokLo, "skyborne", 1, true) ~= nil) or (string.find(raceLo, "skyborne", 1, true) ~= nil)
+  if (p.isSkyborne or not p.raceBit) and not GL._unknownRaceLogged then
+    GL._unknownRaceLogged = true
+    GL.Print(string.format("UnitRace snapshot -> name=%q token=%q raceID=%s faction=%s skyborne=%s raceBit=%s",
+      tostring(race), tostring(raceTok), tostring(raceID), tostring(faction), tostring(p.isSkyborne), tostring(p.raceBit)))
+  end
   local cb
   if tok and type(tok) == "string" then
     local cap = string.upper(string.sub(tok, 1, 1)) .. string.lower(string.sub(tok, 2))
@@ -171,8 +183,33 @@ function GL.InitDB(profile)
     db.lastGoodBackup = { version = db.version, profileKey = db.profileKey }
     db.version = 8
   end
+  if db.version < 9 then
+    db.settings = type(db.settings) == "table" and db.settings or {}
+    if db.settings.useQuestieSpawns == nil then db.settings.useQuestieSpawns = true end
+    db.version = 9
+  end
+  if db.version < 10 then
+    db.settings = type(db.settings) == "table" and db.settings or {}
+    if db.settings.hcWarnings == nil then db.settings.hcWarnings = true end
+    if db.settings.autoQuest == nil then db.settings.autoQuest = false end
+    db.version = 10
+  end
+  if db.version < 11 then
+    db.stepChecks = type(db.stepChecks) == "table" and db.stepChecks or {}
+    db.version = 11
+  end
+  if db.version < 12 then
+    db.skippedDungeons = type(db.skippedDungeons) == "table" and db.skippedDungeons or {}
+    db.version = 12
+  end
+  if db.version < 13 then
+    db.ignoredQuests = type(db.ignoredQuests) == "table" and db.ignoredQuests or {}
+    db.version = 13
+  end
   if type(db.done) ~= "table" then db.done = {} end
   if type(db.skipped) ~= "table" then db.skipped = {} end
+  if type(db.ignoredQuests) ~= "table" then db.ignoredQuests = {} end
+  if type(db.skippedDungeons) ~= "table" then db.skippedDungeons = {} end
   if type(db.settings) ~= "table" then db.settings = {} end
   if type(db.ui) ~= "table" then db.ui = {} end
   if db.settings.mode ~= "speed" and db.settings.mode ~= "thorough" then
@@ -182,6 +219,7 @@ function GL.InitDB(profile)
     GL.Print("Character profile changed (" .. db.profileKey .. " -> " .. profile.key .. "): progress reset.")
     db.done = {}
     db.skipped = {}
+    db.ignoredQuests = {}
     db.synced = nil
   end
   db.profileKey = profile.key
@@ -212,6 +250,38 @@ function GL.BuildDiagnosticString()
   end
   if GL.Integrations then
     lines[#lines + 1] = GL.Integrations.GetSummaryLine()
+  end
+  if GL.QuestieBridge then
+    lines[#lines + 1] = GL.QuestieBridge.GetStatusString()
+  end
+  lines[#lines + 1] = string.format("Hardened Checks: Gossip=%s | ActionBar=%s | Skyborne=%s (rawToken=%s, raceID=%s)",
+    tostring(GL.AutoQuest and GL.AutoQuest.GetGossipMode and GL.AutoQuest.GetGossipMode() or "?"),
+    tostring(GL.ActionBar and GL.ActionBar.mode or "?"),
+    tostring(p.isSkyborne), tostring(p.raceToken), tostring(p.raceID))
+  local hasCanvas = (WorldMapFrame and type(WorldMapFrame.GetCanvas) == "function") and true or false
+  local canvasValid = false
+  if hasCanvas then
+    local okC, cv = pcall(WorldMapFrame.GetCanvas, WorldMapFrame)
+    canvasValid = okC and cv ~= nil
+  end
+  local viewRad = "N/A"
+  if C_Minimap and C_Minimap.GetViewRadius then
+    local okR, rv = pcall(C_Minimap.GetViewRadius)
+    if okR and rv then viewRad = tostring(rv) end
+  end
+  local allyLoaded = (C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded("LevelGuide_Data_Alliance")) and true or false
+  local hordeLoaded = (C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded("LevelGuide_Data_Horde")) and true or false
+  lines[#lines + 1] = string.format("API Probes: GetCanvas=%s (valid=%s) | MinimapViewRadius=%s | issecretvalue=%s | issecrettable=%s",
+    tostring(hasCanvas), tostring(canvasValid), tostring(viewRad), tostring(type(issecretvalue) == "function"), tostring(type(issecrettable) == "function"))
+  lines[#lines + 1] = string.format("Data AddOns Loaded: Alliance=%s | Horde=%s", tostring(allyLoaded), tostring(hordeLoaded))
+  local log = (GL.state and GL.state.log) or {}
+  lines[#lines + 1] = "Active Quests (" .. tostring(#log) .. "):"
+  for _, e in ipairs(log) do
+    lines[#lines + 1] = string.format("  [%s] %s (complete=%s)", tostring(e.id or "?"), tostring(e.title), tostring(e.complete))
+    for _, o in ipairs(e.objectives or {}) do
+      lines[#lines + 1] = string.format("    type=%s %s/%s fin=%s | %s",
+        tostring(o.objectiveType or o.objType or "?"), tostring(o.numFulfilled or "?"), tostring(o.numRequired or "?"), tostring(o.finished), tostring(o.text))
+    end
   end
   lines[#lines + 1] = "--- Last 20 Events ---"
   if #GL.events == 0 then

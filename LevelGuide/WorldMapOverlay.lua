@@ -101,18 +101,24 @@ function WM.OpenToTarget()
     GL.Print("Cannot open World Map during combat.")
     return
   end
-  if not WorldMapFrame then return end
-  if ToggleWorldMap and not WorldMapFrame:IsShown() then
+  local mapId = WM.target and WM.target.mapId or nil
+  if mapId and C_Map and C_Map.OpenWorldMap then
+    pcall(C_Map.OpenWorldMap, mapId)
+  elseif mapId and OpenWorldMap then
+    pcall(OpenWorldMap, mapId)
+  elseif ToggleWorldMap and WorldMapFrame and not WorldMapFrame:IsShown() then
     pcall(ToggleWorldMap)
-  end
-  if WM.target and WM.target.mapId and WorldMapFrame.SetMapID then
-    pcall(WorldMapFrame.SetMapID, WorldMapFrame, WM.target.mapId)
   end
   GL.Safe("WM.Update", WM.Update)
 end
 
 function WM.Update()
   if not WorldMapFrame or not WorldMapFrame:IsShown() then return end
+  -- Clean OpenMap compatibility: hide Blizzard-canvas overlay when OpenMap stitched view is active
+  if GL.Integrations and GL.Integrations.detected and GL.Integrations.detected.OpenMap and not (GL.db and GL.db.settings.forceWorldMapOverlay) then
+    WM.HideAll()
+    return
+  end
   if not WM.layer then WM.Create() end
   if not WM.layer then return end
 
@@ -121,7 +127,8 @@ function WM.Update()
   local cw, ch = canvas:GetWidth(), canvas:GetHeight()
   if not cw or not ch or cw <= 0 or ch <= 0 then return end
 
-  local shownMapId = WorldMapFrame.GetMapID and WorldMapFrame:GetMapID() or nil
+  local okID, shownMapId = pcall(WorldMapFrame.GetMapID or function() return nil end, WorldMapFrame)
+  shownMapId = okID and shownMapId or nil
   WM.HideAll()
   if not shownMapId then return end
 

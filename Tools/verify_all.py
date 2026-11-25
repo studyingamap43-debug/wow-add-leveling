@@ -24,6 +24,9 @@ REMOVED_112_PATTERNS = [
     (r"^\s*AbandonQuest\s*=", "global AbandonQuest overwrite causes UI taint"),
     (r"and\s+GL\.Compat\.ReadPosition\s*\(\)", "multi-return collapse bug on Compat.ReadPosition()"),
     (r"a1\s*>\s*100", "low quest IDs (<100) filtered out in QUEST_ACCEPTED"),
+    (r"\btable\.unpack\b", "Lua 5.2+ table.unpack not in Lua 5.1 (use unpack)"),
+    (r"\bgoto\s+\w+", "Lua 5.2+ goto not in Lua 5.1"),
+    (r"(?<!:)//", "Lua 5.3+ integer division // not in Lua 5.1"),
 ]
 
 
@@ -85,7 +88,7 @@ def main() -> int:
     wp_txt = (ROOT / "LevelGuide" / "Waypoint.lua").read_text(encoding="utf-8")
     mapped_zones = len(re.findall(r'\["[^"]+"\]\s*=\s*\d+', wp_txt))
 
-    print("=== LevelGuide v1.0.1 Offline Verifier (Interface 16001) ===")
+    print("=== LevelGuide v1.2.9 Offline Verifier (Interface 16001) ===")
     print(f"TOCs verified       : {len(tocs)} (all Interface: 16001)")
     print(f"Core Lua files      : {len(core_lua)} (0 removed 1.12 APIs, all balanced)")
     print(f"Alliance quests     : {faction_counts.get('Alliance', 0)} (LoadOnDemand)")

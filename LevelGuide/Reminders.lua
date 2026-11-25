@@ -54,7 +54,8 @@ function Rem.BuildAdvisories(step, ctx)
     out[#out + 1] = string.format("Low gear durability (%d%%) — repair soon.", dur)
   end
   if step and step.kind == "TURNIN" and step.targetZone and ctx.zone and step.targetZone ~= ctx.zone then
-    local bind = GetBindLocation and GetBindLocation() or nil
+    local okB, bind = pcall(GetBindLocation or function() return nil end)
+    bind = okB and bind or nil
     if bind and Rem.IsHearthstoneReady() then
       out[#out + 1] = "Hearthstone READY (bound to " .. tostring(bind) .. ") — check if hearth saves travel."
     end

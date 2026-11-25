@@ -83,16 +83,21 @@ end
 
 -- ---------- per-character filtering ----------
 local function eligible(q, profile)
-  if q.r then
+  -- q.r == 0/nil means no race restriction (pfQuest). 0 is truthy in Lua, so test ~= 0.
+  if q.r and q.r ~= 0 then
     if profile.raceBit then
       if not GL.HasBit(q.r, profile.raceBit) then return false end
     else
+      -- Unknown race (Skyborne, etc.): only allow faction-wide quests, not
+      -- Human-only / Orc-only quests that merely share one faction bit.
       local f = profile.factionMask or 255
-      local ok = false
-      for _, b in ipairs({ 1, 2, 4, 8, 16, 32, 64, 128 }) do
-        if GL.HasBit(q.r, b) and GL.HasBit(f, b) then ok = true end
+      if f ~= 255 then
+        local all = true
+        for _, b in ipairs({ 1, 2, 4, 8, 16, 32, 64, 128 }) do
+          if GL.HasBit(f, b) and not GL.HasBit(q.r, b) then all = false break end
+        end
+        if not all then return false end
       end
-      if not ok then return false end
     end
   end
   if q.c and profile.classBit then
@@ -103,7 +108,7 @@ end
 E.Eligible = eligible
 
 function E.Build(data, profile)
-  local st = { data = data, profile = profile, byTitle = {}, ids = {}, unlocks = {}, n = 0 }
+  local st = { data = data, profile = profile, byTitle = {}, ids = {}, unlocks = {}, children = {}, n = 0 }
   for id, q in pairs(data.quests) do
     if eligible(q, profile) then
       table.insert(st.ids, id)
@@ -119,6 +124,8 @@ function E.Build(data, profile)
     if q and q.p then
       for _, pid in ipairs(q.p) do
         st.unlocks[pid] = (st.unlocks[pid] or 0) + 1
+        if not st.children[pid] then st.children[pid] = {} end
+        table.insert(st.children[pid], id)
       end
     end
   end
@@ -163,17 +170,25 @@ function E.Siblings(st, id)
   return { id } -- exact quest ID only: never mark same-title chain stages done/skipped together
 end
 
--- Exact server-truth sync via C_QuestLog.IsQuestFlaggedCompleted(id)
+-- Exact bidirectional server-truth sync via C_QuestLog.IsQuestFlaggedCompleted(id).
+-- Marks server-completed quests done AND reopens any quest falsely marked done locally
+-- so Scan/Sync always returns to missed or uncompleted steps even if not in the quest log.
 function E.SyncFromServer(st, db, isCompletedFn)
-  if type(isCompletedFn) ~= "function" then return 0 end
-  local count = 0
+  if type(isCompletedFn) ~= "function" then return 0, 0 end
+  local added, reopened = 0, 0
   for _, id in ipairs(st.ids) do
-    if not db.done[id] and isCompletedFn(id) then
+    local doneServer = isCompletedFn(id) and true or false
+    if doneServer and not db.done[id] then
       db.done[id] = true
-      count = count + 1
+      if db.skipped then db.skipped[id] = nil end
+      added = added + 1
+    elseif (not doneServer) and db.done[id] then
+      db.done[id] = nil
+      reopened = reopened + 1
     end
   end
-  return count
+  st._availKey = nil
+  return added, reopened
 end
 
 -- Fallback mid-game sync if server API is unavailable
@@ -246,19 +261,51 @@ local function window(db)
   return 7, 3
 end
 
+function E.CountBlockedFollowUps(st, db, ids)
+  if not st or not st.children or type(ids) ~= "table" then return 0, {} end
+  local visited, queue, names = {}, {}, {}
+  for _, id in ipairs(ids) do
+    if type(id) == "number" and not visited[id] then
+      visited[id] = true
+      queue[#queue + 1] = id
+    end
+  end
+  local head, count, limit = 1, 0, 200
+  while head <= #queue and head <= limit do
+    local cur = queue[head]
+    head = head + 1
+    local kids = st.children[cur]
+    if kids then
+      for _, cid in ipairs(kids) do
+        if not visited[cid] then
+          visited[cid] = true
+          if not (db and ((db.done and db.done[cid]) or (db.skipped and db.skipped[cid]) or (db.ignoredQuests and db.ignoredQuests[cid]))) then
+            count = count + 1
+            local cq = st.data and st.data.quests and st.data.quests[cid]
+            if cq and cq.n and #names < 3 then names[#names + 1] = cq.n end
+            queue[#queue + 1] = cid
+          end
+        end
+      end
+    end
+  end
+  return count, names
+end
+
 function E.Available(st, db, level, inLog)
-  local doneN, skipN, logN = 0, 0, 0
+  local doneN, skipN, ignN, logN = 0, 0, 0, 0
   for _ in pairs(db.done or {}) do doneN = doneN + 1 end
   for _ in pairs(db.skipped or {}) do skipN = skipN + 1 end
+  for _ in pairs(db.ignoredQuests or {}) do ignN = ignN + 1 end
   for _ in pairs(inLog or {}) do logN = logN + 1 end
-  local cKey = string.format("%d:%s:%d:%d:%d", level, tostring(db.settings.mode), doneN, skipN, logN)
+  local cKey = string.format("%d:%s:%d:%d:%d:%d", level, tostring(db.settings.mode), doneN, skipN, ignN, logN)
   if st._availKey == cKey and st._availCache then return st._availCache end
 
   local lo, hi = window(db)
   local out = {}
   for _, id in ipairs(st.ids) do
     local q = st.data.quests[id]
-    if q and not db.done[id] and not db.skipped[id] and not inLog[id]
+    if q and not db.done[id] and not db.skipped[id] and not (db.ignoredQuests and db.ignoredQuests[id]) and not inLog[id]
        and q.m <= level and q.l >= level - lo and q.l <= level + hi and q.l >= 1
        and q.s[1] ~= "I" and prereqOk(st, db, q, level) then
       table.insert(out, id)
@@ -328,7 +375,7 @@ end
 
 
 -- Thorough High-XP/hr scoring helpers (keeps full Thorough quest coverage while ordering by XP/minute)
-local function estQuestXP(st, q, playerLevel, xpRate)
+local function estQuestXP(st, q, qid, playerLevel, xpRate)
   if not q then return 0 end
   local ql = math.max(1, q.l or 1)
   local base = (45 + ql * 5) * (1 + ql * 0.085) * (xpRate or 1.0)
@@ -344,7 +391,7 @@ local function estQuestXP(st, q, playerLevel, xpRate)
     mult = 0.70 -- deep orange/red = slower kill time / higher death risk
   end
   -- Chain starter bonus: quests that unlock follow-ups multiply hub XP/hr
-  local chainBonus = (st.unlocks and st.unlocks[q._id or 0]) and 1.25 or 1.0
+  local chainBonus = (st.unlocks and qid and st.unlocks[qid]) and 1.25 or 1.0
   return base * mult * chainBonus
 end
 
@@ -365,7 +412,9 @@ function E.Next(st, db, ctx)
     if e.id then
       logById[e.id] = e
       for _, sid in ipairs(E.Siblings(st, e.id)) do inLog[sid] = true end
-      if e.complete then table.insert(complete, e) elseif not e.failed then table.insert(incomplete, e) end
+      if not (db.ignoredQuests and db.ignoredQuests[e.id]) then
+        if e.complete then table.insert(complete, e) elseif not e.failed then table.insert(incomplete, e) end
+      end
     end
   end
   local step = { kind = "NONE", header = "", lines = {}, level = level }
@@ -455,19 +504,16 @@ function E.Next(st, db, ctx)
             if hd <= 6 then nearbyClusterQuests = nearbyClusterQuests + #oh.ids end
           end
         end
-        -- Thorough High-XP/hr hub score: negate XP/minute so lower score wins
-        local xpRate = (db.settings and tonumber(db.settings.xpRate)) or 1.0
-        local hubXP = 0
+        -- Local-cluster-first deterministic hub score: always finish nearby clusters
+        -- before walking across the map; tie-break by quest count and lowest level.
+        local minLvl = 99
         for _, id in ipairs(h.ids) do
           local q = st.data.quests[id]
-          if q then q._id = id hubXP = hubXP + estQuestXP(st, q, level, xpRate) end
+          if q and q.l and q.l < minLvl then minLvl = q.l end
         end
-        hubXP = hubXP + (nearbyClusterQuests * (45 + level * 5) * 0.65)
-        local walkMin = estWalkMinutes(d, level, not samezone(st, h.n, ctx.zone))
-        local estMin = math.max(0.35, walkMin + (#h.ids * 0.25))
-        local xpPerMin = hubXP / estMin
-        h.xpPerHr = math.floor(xpPerMin * 60 + 0.5)
-        h.score = -xpPerMin
+        local localBand = (curHas and d <= 18) and 0 or 1000
+        h.dist = d
+        h.score = localBand + (d * 3.0) - math.min(18, (#h.ids + nearbyClusterQuests) * 1.5) + (minLvl * 0.25)
         if not bestScore or h.score < bestScore or (h.score == bestScore and k < hub.key) then
           bestScore, hub = h.score, h
         end
@@ -475,34 +521,34 @@ function E.Next(st, db, ctx)
     end
   end
 
-  -- 3) 200-IQ Area Quest Cluster Optimizer: finish same-hub quests before walking back to turn in!
-  local deferTurnIn = false
-  if step.kind == "TURNIN" and #incomplete > 0 and (ctx.logCount or 0) < maxQ then
+  -- 3) Local-Cluster-First Turn-In Guard: never walk across the map to turn in while
+  -- local pickups or active objectives remain nearby in your current cluster!
+  local LOCAL_RADIUS = 18
+  if step.kind == "TURNIN" and (ctx.logCount or 0) < maxQ then
     local clusterOn = not (db.settings and db.settings.clusterRoute == false)
     if clusterOn and step.target then
       local turnInDist = (ctx.px and samezone(st, step.target, ctx.zone)) and dist(ctx.px, ctx.py, step.target) or 999
       local turnInCrossZone = ctx.zone and not samezone(st, step.target, ctx.zone)
-      -- Defer turn-in if turn-in is far (> 10 units) OR cross-zone AND we have active quests in our current zone or same hub!
-      if turnInCrossZone or turnInDist > 10 then
-        local localInc = 0
+      if turnInCrossZone or turnInDist > LOCAL_RADIUS then
+        local localWork = 0
         for _, inc in ipairs(incomplete) do
           local iq = st.data.quests[inc.id]
           local itn = iq and npcOf(st, iq.e)
           local isn = iq and npcOf(st, iq.s)
           local inCurZone = (itn and samezone(st, itn, ctx.zone)) or (isn and samezone(st, isn, ctx.zone))
-          local sameHub = (itn and itn[2] == step.target[2] and math.sqrt((itn[3] - step.target[3]) ^ 2 + (itn[4] - step.target[4]) ^ 2) <= 18)
-          if inCurZone or sameHub then localInc = localInc + 1 end
+          local nearMe = (ctx.px and itn and samezone(st, itn, ctx.zone) and dist(ctx.px, ctx.py, itn) <= 24)
+            or (ctx.px and isn and samezone(st, isn, ctx.zone) and dist(ctx.px, ctx.py, isn) <= 24)
+          if inCurZone and (turnInCrossZone or nearMe or turnInDist > 26) then localWork = localWork + 1 end
         end
-        if localInc > 0 then
-          local sameHubInc = localInc
-          deferTurnIn = true
+        local localPickup = (hub and ctx.px and samezone(st, hub.n, ctx.zone) and (dist(ctx.px, ctx.py, hub.n) or 999) <= LOCAL_RADIUS)
+        if localWork > 0 or localPickup then
           step.deferredTurnInCount = #complete
           step.deferredTurnInNpc = step.target[1]
           table.insert(advisories, string.format(
-            "Cluster Route: Finish %d active quest(s) in this area first, then batch turn-in (%d ready) at %s — saves walking!",
-            sameHubInc, #complete, tostring(step.target[1])
+            "Local Cluster First: Finish nearby quest(s) here before turning in (%d ready) at %s.",
+            #complete, tostring(step.target[1])
           ))
-          step.kind = "NONE" -- fall through to OBJECTIVE / nearby PICKUP
+          step.kind = "NONE"
           step.target = nil
           step.where = nil
         end
@@ -522,7 +568,7 @@ function E.Next(st, db, ctx)
     end
   elseif #incomplete > 0 then
     local near = false
-    if hub and (ctx.logCount or 0) < maxQ and ctx.px and samezone(st, hub.n, ctx.zone) and dist(ctx.px, ctx.py, hub.n) <= 10 then
+    if hub and (ctx.logCount or 0) < maxQ and ctx.px and samezone(st, hub.n, ctx.zone) and dist(ctx.px, ctx.py, hub.n) <= LOCAL_RADIUS then
       near = true
     end
     if near then
@@ -534,34 +580,24 @@ function E.Next(st, db, ctx)
       step.header = "Complete objectives"
       local ids = {}
       for _, e in ipairs(incomplete) do table.insert(ids, e.id) end
-      local xpRate = (db.settings and tonumber(db.settings.xpRate)) or 1.0
+      -- Deterministic local-cluster-first ordering with step lock (prevents mid-walk flip-flopping)
+      local lockedQid = st._lockedObjId
       local function objScore(qid)
         local q = st.data.quests[qid]
         if not q then return 1e9 end
-        q._id = qid
         local n = npcOf(st, q.e) or npcOf(st, q.s)
         local crossZ = not (n and samezone(st, n, ctx.zone))
         local d = (n and ctx.px and not crossZ) and (dist(ctx.px, ctx.py, n) or 25) or 25
-        local rem = 5
-        local le = logById[qid]
-        if le and le.objectives and #le.objectives > 0 then
-          rem = 0
-          for _, o in ipairs(le.objectives) do
-            if not o.finished then rem = rem + math.max(1, (o.numRequired or 1) - (o.numFulfilled or 0)) end
-          end
-        end
-        local xpVal = estQuestXP(st, q, level, xpRate)
-        local walkMin = estWalkMinutes(d, level, crossZ)
-        local workMin = math.max(0.4, math.min(25, rem) * 0.35)
-        local xpPerMin = xpVal / (walkMin + workMin)
-        -- Return negative XP/min (with strong same-zone bonus) so highest local XP/hr sorts #1!
-        return (crossZ and 10000 or 0) - xpPerMin
+        -- Keep current locked objective steady while still in the same zone unless another is right next to you
+        local lockBonus = (not crossZ and lockedQid and qid == lockedQid and d <= 35) and -12 or 0
+        return (crossZ and 10000 or 0) + (d * 2.0) + ((q.l or 1) * 0.25) + lockBonus
       end
       table.sort(ids, function(a, b)
         local sa, sb = objScore(a), objScore(b)
         if sa ~= sb then return sa < sb end
         return a < b
       end)
+      st._lockedObjId = ids[1]
       step.lines = lines_for(st, ids, "obj", logById)
       step.ids = ids
       local q1 = st.data.quests[ids[1]]
@@ -603,6 +639,7 @@ function E.Next(st, db, ctx)
     if GL.mod(level, 2) == 0 then table.insert(advisories, "Level " .. level .. ": visit your class trainer for new spells.") end
     if level == 10 then table.insert(advisories, "Level 10 breakpoint: talents unlocked + class quest (Warrior Stance / Hunter Pet / Warlock Voidwalker).") end
     if level == 20 then table.insert(advisories, "Level 20 breakpoint: check class quest & weapon masters.") end
+    if level == 25 then table.insert(advisories, "Level 25 (Forever): spend Legacy points on Well Rested for boosted rested XP!") end
     if level == 30 then table.insert(advisories, "Level 30 breakpoint: class quest chain (e.g., Whirlwind Weapon / mounts).") end
     if level == 40 then table.insert(advisories, "Level 40 breakpoint: Riding Skill (60% mount) & class mount quests.") end
     if level == 48 then table.insert(advisories, "Level 48+ (Forever): most quests Lv 48+ now award bonus gold — complete them while leveling!") end
@@ -649,7 +686,8 @@ function E.Next(st, db, ctx)
         if le and le.objectives and #le.objectives > 0 then
           for _, o in ipairs(le.objectives) do
             if not o.finished then
-              local verb = (o.objType == "monster") and "Kill: " or ((o.objType == "item") and "Kill/Loot: " or "Complete: ")
+              local ot = o.objectiveType or o.objType
+              local verb = (ot == "monster") and "[Mob] " or ((ot == "item") and "[Item] " or ((ot == "object") and "[Obj] " or ((ot == "event") and "[Event] " or ((ot == "reputation") and "[Rep] " or ((ot == "spell") and "[Spell] " or "")))))
               local rem = (o.numRequired and o.numRequired > 0 and o.numFulfilled ~= nil)
                 and string.format(" (client: %d/%d)", o.numFulfilled, o.numRequired) or ""
               wt[#wt + 1] = string.format("%d. %s%s%s [%s]", idx, verb, tostring(o.text), rem, q.n)
@@ -677,7 +715,92 @@ function E.Next(st, db, ctx)
     wt[#wt + 1] = "3. Grab any follow-up quests, sell grey junk, and check nearby trainer."
   end
   step.walkthrough = wt
+
+  -- Class-specific route step (filtered by Engine classBit, wired to PathInfo.CLASS_REMINDERS)
+  local classStep = GL.PathInfo and GL.PathInfo.GetClassStepsForEngine and
+    GL.PathInfo.GetClassStepsForEngine(st.profile and st.profile.classBit, level, db)
+  if classStep then
+    -- Do not displace in-log work or a same-zone pickup/turn-in.
+    local keepCurrent = (step.kind == "TURNIN") or (step.kind == "OBJECTIVE")
+      or (step.kind == "PICKUP" and step.target and samezone(st, step.target, ctx.zone))
+    if not keepCurrent then
+      local prevSummary = (step.kind ~= "NONE" and step.header ~= "") and (step.header .. (step.targetZone and (" (" .. step.targetZone .. ")") or "")) or nil
+      local cstep = {
+        kind = "CLASS",
+        header = string.format("%s Lv %d: %s [UNVERIFIED]", classStep.classTok, classStep.lv, classStep.title),
+        lines = {
+          "- " .. classStep.title .. " (" .. classStep.classTok .. " Lv " .. tostring(classStep.lv) .. ") [UNVERIFIED]",
+          "- " .. classStep.note,
+        },
+        walkthrough = {
+          "1. Class Quest [UNVERIFIED]: " .. classStep.title .. " — " .. classStep.note,
+          "2. " .. ((classStep.reminder ~= "") and classStep.reminder or "Visit your class trainer."),
+          "3. Click Ignore or Skip once completed (or to defer this class step).",
+        },
+        ids = { classStep.id },
+        level = level,
+        unverified = true,
+        advisories = step.advisories,
+        hubSummary = step.hubSummary,
+        nextPreview = prevSummary or step.nextPreview,
+      }
+      return cstep
+    end
+  end
+
   return step
+end
+
+-- Quest Log Optimizer (uses C_QuestLog-derived st.log + pfQuest zone lookup only)
+function E.OptimizeQuestLog(st, db, ctx)
+  local level = (ctx and ctx.level) or 1
+  local zone = ctx and ctx.zone
+  local log = (st and st.log) or {}
+  local maxQ = (ctx and ctx.maxQuests) or 20
+  local logN = (ctx and ctx.logCount) or #log
+  local nearCap = (logN >= math.max(1, maxQ - 3))
+  local function grayLevel(lv)
+    if lv <= 5 then return 0
+    elseif lv <= 39 then return lv - math.floor(lv / 10) - 5
+    elseif lv <= 59 then return lv - math.floor(lv / 5) - 1
+    else return lv - 9
+    end
+  end
+  local greyCut = grayLevel(level)
+  local grey, turnIns, offRoute = {}, {}, {}
+
+  for _, e in ipairs(log) do
+    local label = string.format("[%s] %s (Lv %s)", tostring(e.questID or e.id or "?"), tostring(e.title or "?"), tostring(e.level or "?"))
+    if e.complete then
+      turnIns[#turnIns + 1] = label
+    elseif e.level and e.level > 0 and e.level <= greyCut then
+      grey[#grey + 1] = label
+    else
+      local q = e.id and st and st.data and st.data.quests and st.data.quests[e.id]
+      if db and db.ignoredQuests and e.id and db.ignoredQuests[e.id] then
+        offRoute[#offRoute + 1] = label .. " [ignored]"
+      elseif not q then
+        offRoute[#offRoute + 1] = label .. " [not in guide data]"
+      elseif zone and zone ~= "" then
+        local sn = npcOf(st, q.s)
+        local en = npcOf(st, q.e)
+        local inCur = (sn and samezone(st, sn, zone)) or (en and samezone(st, en, zone))
+        if not inCur then
+          local qz = (en and zoneName(st, en[2])) or (sn and zoneName(st, sn[2])) or "?"
+          offRoute[#offRoute + 1] = label .. " [" .. qz .. "]"
+        end
+      end
+    end
+  end
+
+  return {
+    nearCap = nearCap,
+    logCount = logN,
+    maxQuests = maxQ,
+    grey = grey,
+    turnIns = turnIns,
+    offRoute = offRoute,
+  }
 end
 
 function E.Progress(level, xp, xpmax)
@@ -688,14 +811,30 @@ function E.Progress(level, xp, xpmax)
   return p
 end
 
--- Scan for the nearest high-XP/hr quest hub / leveling area from player's current position
+-- Scan for the nearest missed/unaccepted quest hub or leveling area from player's current position.
+-- Finds uncompleted quests not in the quest log (prioritizing missed chain starters and lower-level
+-- pickups in the current zone), and falls back to temporarily skipped quests if none remain.
 function E.ScanNearestArea(st, db, ctx)
   local level = ctx.level or 1
   local inLog = {}
   for _, e in ipairs(st.log or {}) do
     if e.id then inLog[e.id] = true end
   end
+  st._availKey = nil
   local avail = E.Available(st, db, level, inLog)
+  local fromSkipped = false
+  if #avail == 0 and db and type(db.skipped) == "table" then
+    local lo, hi = window(db)
+    for _, id in ipairs(st.ids) do
+      local q = st.data.quests[id]
+      if q and db.skipped[id] and not db.done[id] and not (db.ignoredQuests and db.ignoredQuests[id]) and not inLog[id]
+         and q.m <= level and q.l >= level - lo and q.l <= level + hi and q.l >= 1
+         and q.s[1] ~= "I" and prereqOk(st, db, q, level) then
+        avail[#avail + 1] = id
+      end
+    end
+    if #avail > 0 then fromSkipped = true end
+  end
   if #avail == 0 then return nil end
 
   local hubs = {}
@@ -705,8 +844,10 @@ function E.ScanNearestArea(st, db, ctx)
     if n then
       local k = q.s[1] .. q.s[2]
       local h = hubs[k]
-      if not h then h = { n = n, ids = {}, z = n[2], zone = zoneName(st, n[2]) } hubs[k] = h end
+      if not h then h = { n = n, ids = {}, z = n[2], zone = zoneName(st, n[2]), chainCount = 0, minLvl = 99 } hubs[k] = h end
       h.ids[#h.ids + 1] = id
+      if st.unlocks and st.unlocks[id] then h.chainCount = h.chainCount + 1 end
+      if q.l and q.l < h.minLvl then h.minLvl = q.l end
     end
   end
 
@@ -718,15 +859,17 @@ function E.ScanNearestArea(st, db, ctx)
     local hubXP = 0
     for _, id in ipairs(h.ids) do
       local q = st.data.quests[id]
-      if q then q._id = id hubXP = hubXP + estQuestXP(st, q, level, xpRate) end
+      if q then hubXP = hubXP + estQuestXP(st, q, id, level, xpRate) end
     end
-    -- Strong nearest-area bias in current zone, else highest-density leveling zone for your level
-    local score = sameZ and ((d * 2.5) - math.min(20, #h.ids * 3) - (hubXP / 500)) or (5000 - (#h.ids * 25) - (hubXP / 200))
+    -- Prioritize missed chain starters and earlier pickups in current zone, else nearest/densest hub
+    local missedBias = (h.chainCount * 12) + math.max(0, (level - h.minLvl) * 4)
+    local score = sameZ and ((d * 2.5) - missedBias - math.min(20, #h.ids * 3) - (hubXP / 500)) or (5000 - missedBias - (#h.ids * 25) - (hubXP / 200))
     if score < bestScore then
       bestScore = score
       best = h
       best.distUnits = d
       best.sameZone = sameZ
+      best.fromSkipped = fromSkipped
     end
   end
   return best

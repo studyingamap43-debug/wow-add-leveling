@@ -68,17 +68,19 @@ function C.GetQuestObjectives(questId)
   local out = {}
   if not questId or not C_QuestLog or not C_QuestLog.GetQuestObjectives then return out end
   local ok, objs = pcall(C_QuestLog.GetQuestObjectives, questId)
-  if ok and type(objs) == "table" then
+  objs = ok and C.SafeTable(objs) or nil
+  if objs then
     for i = 1, #objs do
-      local o = objs[i]
-      if o and o.text then
+      local o = C.SafeTable(objs[i])
+      local txt = o and C.SafeValue(o.text) or nil
+      if o and type(txt) == "string" then
         out[#out + 1] = {
-          text = o.text,
-          finished = o.finished and true or false,
-          numFulfilled = tonumber(o.numFulfilled),
-          numRequired = tonumber(o.numRequired),
-          objType = o.type,
-          objectiveType = o.objectiveType or o.type,
+          text = txt,
+          finished = (C.SafeValue(o.finished) == true),
+          numFulfilled = C.SafeNumber(o.numFulfilled, nil),
+          numRequired = C.SafeNumber(o.numRequired, nil),
+          objType = C.SafeValue(o.type),
+          objectiveType = C.SafeValue(o.objectiveType) or C.SafeValue(o.type),
         }
       end
     end
@@ -146,6 +148,25 @@ function C.ReadPosition()
   return mapId, zoneName, px, py
 end
 
+-- Project player coordinates directly into a specific UiMapID (fixes sub-map / cave / micro-map drift)
+function C.ReadPositionOnMap(targetMapId)
+  if type(targetMapId) ~= "number" or not C_Map or not C_Map.GetPlayerMapPosition then
+    return nil, nil
+  end
+  local okP, pos = pcall(C_Map.GetPlayerMapPosition, targetMapId, "player")
+  if okP and pos and pos.GetXY then
+    local okXY, x, y = pcall(pos.GetXY, pos)
+    if okXY then
+      x = C.SafeNumber(x, nil)
+      y = C.SafeNumber(y, nil)
+      if x and y and (x ~= 0 or y ~= 0) and x >= 0 and x <= 1 and y >= 0 and y <= 1 then
+        return x * 100, y * 100
+      end
+    end
+  end
+  return nil, nil
+end
+
 -- Counts item across bags + bank (for profession mat tracker)
 function C.GetItemCount(itemId, includeBank)
   if not itemId then return 0 end
@@ -157,6 +178,13 @@ function C.GetItemCount(itemId, includeBank)
 end
 
 function C.GetMemoryKB()
+  if C_AddOns and C_AddOns.UpdateAddOnMemoryUsage and C_AddOns.GetAddOnMemoryUsage then
+    local okU = pcall(C_AddOns.UpdateAddOnMemoryUsage)
+    if okU then
+      local okM, kb = pcall(C_AddOns.GetAddOnMemoryUsage, "LevelGuide")
+      if okM and kb then return kb end
+    end
+  end
   if UpdateAddOnMemoryUsage and GetAddOnMemoryUsage then
     local ok = pcall(UpdateAddOnMemoryUsage)
     if ok then
@@ -172,18 +200,56 @@ function C.GetMemoryKB()
 end
 
 function C.IsSecret(val)
-  if issecretvalue then
-    local ok, sec = pcall(issecretvalue, val)
-    if ok and sec then return true end
-  end
-  return false
+  if type(issecretvalue) ~= "function" then return false end
+  local ok, sec = pcall(issecretvalue, val)
+  return ok and sec == true
+end
+
+function C.SafeValue(val)
+  if C.IsSecret(val) then return nil end
+  return val
+end
+
+function C.IsSecretTable(val)
+  if C.IsSecret(val) then return true end
+  if type(val) ~= "table" then return false end
+  if type(issecrettable) ~= "function" then return false end
+  local ok, sec = pcall(issecrettable, val)
+  return (not ok) or sec == true
+end
+
+function C.SafeTable(val)
+  if C.IsSecretTable(val) or type(val) ~= "table" then return nil end
+  return val
 end
 
 function C.SafeNumber(val, default)
-  if val == nil or C.IsSecret(val) or type(val) ~= "number" then
-    return default
-  end
+  val = C.SafeValue(val)
+  if type(val) ~= "number" then return default end
+  if val ~= val or val == math.huge or val == -math.huge then return default end
   return val
+end
+
+function C.PlayerSpeed()
+  if type(GetUnitSpeed) ~= "function" then return nil end
+  local ok, cur, run, flight, swim = pcall(GetUnitSpeed, "player")
+  if not ok then return nil end
+  return C.SafeNumber(cur, nil), C.SafeNumber(run, nil), C.SafeNumber(flight, nil), C.SafeNumber(swim, nil)
+end
+
+function C.PlayerFacing()
+  if type(GetPlayerFacing) ~= "function" then return nil end
+  local ok, raw = pcall(GetPlayerFacing)
+  if not ok then return nil end
+  return C.SafeNumber(raw, nil)
+end
+
+function C.UnitGUID(unit)
+  if type(UnitGUID) ~= "function" then return nil end
+  local ok, raw = pcall(UnitGUID, unit)
+  if not ok then return nil end
+  local g = C.SafeValue(raw)
+  return (type(g) == "string") and g or nil
 end
 
 function C.GetCVar(name)

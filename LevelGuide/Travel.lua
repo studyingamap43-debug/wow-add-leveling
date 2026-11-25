@@ -54,15 +54,15 @@ function T.GetRouteHint(fromZone, toZone, faction)
   if cFrom and cTo and cFrom ~= cTo then
     if faction == "Alliance" then
       if cTo == "Kalimdor" then
-        return "Travel (EK -> Kalimdor): Boat from Menethil Harbor (Wetlands) to Auberdine/Theramore, or Booty Bay -> Ratchet."
+        return "Travel (EK -> Kalimdor): Forever ship Stormwind Harbor -> Auberdine, Menethil -> Theramore, or Booty Bay -> Ratchet."
       else
-        return "Travel (Kalimdor -> EK): Boat from Auberdine/Theramore to Menethil Harbor (Wetlands), or Ratchet -> Booty Bay."
+        return "Travel (Kalimdor -> EK): Forever ship Auberdine -> Stormwind Harbor, Theramore -> Menethil, or Tanaris <-> Powderfuse Port (Riverglades)."
       end
     else
       if cTo == "Kalimdor" then
-        return "Travel (EK -> Kalimdor): Zeppelin from Undercity (Brill) or Grom'gol (STV) to Orgrimmar, or Booty Bay -> Ratchet."
+        return "Travel (EK -> Kalimdor): Zeppelin from Undercity (Brill) or Grom'gol (STV) to Orgrimmar, Booty Bay -> Ratchet, or Tanaris <-> Powderfuse Port (Riverglades)."
       else
-        return "Travel (Kalimdor -> EK): Zeppelin outside Orgrimmar to Undercity or Grom'gol (STV), or Ratchet -> Booty Bay."
+        return "Travel (Kalimdor -> EK): Zeppelin outside Orgrimmar to Undercity or Grom'gol (STV), Ratchet -> Booty Bay, or Tanaris <-> Powderfuse Port (Riverglades)."
       end
     end
   end

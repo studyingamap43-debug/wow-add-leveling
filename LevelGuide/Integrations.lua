@@ -77,7 +77,6 @@ function I.GetAuctionPriceCopper(itemId)
   if ok and type(price) == "number" and price > 0 then
     return price
   end
-  if fallbackX then return fallbackName, fallbackZ, fallbackX, fallbackY end
   return nil
 end
 
@@ -101,7 +100,6 @@ function I.GetQuestieQuestName(questId)
       return name
     end
   end
-  if fallbackX then return fallbackName, fallbackZ, fallbackX, fallbackY end
   return nil
 end
 
@@ -156,11 +154,11 @@ function I.GetQuestieObjectiveTarget(questId, curMapId)
   local okQ, q = pcall(qdb.GetQuest, questId)
   if not okQ or type(q) ~= "table" or type(q.Objectives) ~= "table" then return nil end
 
+  local fallbackName, fallbackZ, fallbackX, fallbackY = nil, nil, nil, nil
   for _, obj in pairs(q.Objectives) do
     if type(obj) == "table" and not obj.Completed and type(obj.spawnList) == "table" then
       for _, sp in pairs(obj.spawnList) do
         if type(sp) == "table" and type(sp.Spawns) == "table" then
-          local fallbackName, fallbackZ, fallbackX, fallbackY = nil, nil, nil, nil
           for zoneId, coordsList in pairs(sp.Spawns) do
             if type(coordsList) == "table" and type(coordsList[1]) == "table" then
               local cx, cy = coordsList[1][1], coordsList[1][2]

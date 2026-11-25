@@ -58,8 +58,7 @@ function RA.OnMouseoverUnit()
   if UnitIsDead and UnitIsDead("mouseover") then return end
   local cls = UnitClassification and UnitClassification("mouseover")
   if cls ~= "rare" and cls ~= "rareelite" then return end
-  local guid = UnitGUID and UnitGUID("mouseover")
-  if guid and GL.Compat and GL.Compat.IsSecret(guid) then return end
+  local guid = GL.Compat and GL.Compat.UnitGUID("mouseover") or nil
   if guid and RA.seenGuids[guid] then return end
   if guid then RA.seenGuids[guid] = true end
 

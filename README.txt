@@ -1,4 +1,4 @@
-LevelGuide v1.0.1 — WoW: Forever 1.60.1.71037 (Interface: 16001)
+LevelGuide v1.2.9 (review hotfixes on Gemini v1.2.6) — WoW: Forever 1.60.1.71037 (Interface: 16001)
 
 INSTALL
   Extract all 3 folders directly into World of Warcraft/_forever_/Interface/AddOns/:
@@ -27,6 +27,10 @@ COMMANDS
   /guide sync         sync completed quests from server (C_QuestLog.IsQuestFlaggedCompleted)
   /guide reset        wipe this character's progress only
   /guide debug        open copyable diagnostic & error report
+  /guide skipdungeon  dismiss the current level-band dungeon prompt
+  /guide ignore       ignore the current step (per character)
+  /guide unignore     restore one ignored id, or /guide unignore all
+  /guide optimize     quest log optimizer (also /guide cleanup)
   /guide test         run in-game API + behavioral self-test
 
 DATA PROVENANCE & LIMITATIONS

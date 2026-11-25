@@ -56,7 +56,32 @@ W.ZONE_TO_UIMAP = {
   ["Thunder Bluff"] = 1456,
   ["Darnassus"] = 1457,
   ["Undercity"] = 1458,
+  ["Alterac Valley"] = 1459,
+  -- New WoW: Forever zones (UiMapIDs confirmed on forever.azerpug.com, azerdex.com, and moredots.io)
+  ["Riverglades"] = 2548,
+  ["Mount Hyjal"] = 2482,
+  Hyjal = 2482,
+  ["Shen'dralas"] = 2652,
+  ["Zephras Isle"] = 2521,
 }
+
+-- If the static table misses a name, use the player's current map when the names match.
+function W.ResolveMapId(zoneName)
+  if not zoneName or zoneName == "" then return nil end
+  local id = W.ZONE_TO_UIMAP[zoneName]
+  if id then return id end
+  if C_Map and C_Map.GetBestMapForUnit and C_Map.GetMapInfo then
+    local okM, mapId = pcall(C_Map.GetBestMapForUnit, "player")
+    if okM and mapId then
+      local okI, info = pcall(C_Map.GetMapInfo, mapId)
+      if okI and type(info) == "table" and type(info.name) == "string"
+         and string.lower(info.name) == string.lower(zoneName) then
+        return mapId
+      end
+    end
+  end
+  return nil
+end
 
 function W.Clear()
   if lastTomTomUid and TomTom and TomTom.RemoveWaypoint then
@@ -72,13 +97,18 @@ function W.Clear()
 end
 
 -- target = { npcName, pfZoneId, x_0_100, y_0_100 }
-function W.SetForTarget(target, zoneName, title)
+function W.SetForTarget(target, zoneName, title, explicitMapId)
   if not target or not target[3] or not target[4] then
     return false, "No coordinates available for this step."
   end
-  local x, y = target[3], target[4]
-  local mapId = zoneName and W.ZONE_TO_UIMAP[zoneName] or nil
+  local mapId = (type(explicitMapId) == "number" and explicitMapId > 0 and explicitMapId)
+    or (zoneName and (W.ResolveMapId and W.ResolveMapId(zoneName) or W.ZONE_TO_UIMAP[zoneName]) or nil)
   local label = (title or "LevelGuide") .. " - " .. tostring(target[1] or "")
+  local loc = GL.Location and GL.Location.FromZonePct(zoneName, target[3], target[4], "LevelGuide", "npc", "unverified", mapId, label) or nil
+  if not loc then return false, "Invalid coordinates rejected by Location validator." end
+  GL.activeLocation = loc
+  local x, y = loc.xPercent, loc.yPercent
+  mapId = loc.uiMapID
   if GL.Arrow and GL.Arrow.SetTarget then
     GL.Arrow.SetTarget(mapId, zoneName, x, y, title, target[1])
   end

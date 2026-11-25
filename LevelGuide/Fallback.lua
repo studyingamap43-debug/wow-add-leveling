@@ -203,3 +203,14 @@ function F.GetProfessionLines(profName)
   end
   return rows
 end
+
+function F.GetPromptDungeon(level, faction, skippedMap)
+  level = tonumber(level) or 1
+  skippedMap = skippedMap or {}
+  for _, d in ipairs(F.DUNGEONS) do
+    if (d.fac == "Both" or d.fac == faction) and level >= d.minL and level <= d.maxL and not skippedMap[d.name] then
+      return d
+    end
+  end
+  return nil
+end

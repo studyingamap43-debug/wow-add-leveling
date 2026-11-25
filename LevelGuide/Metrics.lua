@@ -11,19 +11,25 @@ M.lastXP = nil
 M.lastXPMax = nil
 M.lastLevel = nil
 
+local function readXP()
+  local xp = (GL.Compat and GL.Compat.SafeNumber(UnitXP and UnitXP("player"), nil)) or 0
+  local mx = (GL.Compat and GL.Compat.SafeNumber(UnitXPMax and UnitXPMax("player"), nil)) or 1
+  local lv = (GL.Compat and GL.Compat.SafeNumber(UnitLevel and UnitLevel("player"), nil)) or 1
+  if mx < 1 then mx = 1 end
+  return xp, mx, lv
+end
+
 function M.Init()
   M.startTime = GetTime and GetTime() or 0
   M.sessionXP = 0
-  M.lastXP = UnitXP and UnitXP("player") or 0
-  M.lastXPMax = UnitXPMax and UnitXPMax("player") or 1
-  M.lastLevel = UnitLevel and UnitLevel("player") or 1
+  M.lastXP, M.lastXPMax, M.lastLevel = readXP()
 end
 
 function M.Update()
   if not M.startTime then M.Init() return end
-  local curXP = UnitXP and UnitXP("player") or 0
-  local curMax = UnitXPMax and UnitXPMax("player") or 1
-  local curLv = UnitLevel and UnitLevel("player") or 1
+  local curXP = (GL.Compat and GL.Compat.SafeNumber(UnitXP and UnitXP("player"), nil)) or M.lastXP or 0
+  local curMax = (GL.Compat and GL.Compat.SafeNumber(UnitXPMax and UnitXPMax("player"), nil)) or M.lastXPMax or 1
+  local curLv = (GL.Compat and GL.Compat.SafeNumber(UnitLevel and UnitLevel("player"), nil)) or M.lastLevel or 1
 
   if curLv > (M.lastLevel or curLv) then
     local gained = math.max(0, (M.lastXPMax or 0) - (M.lastXP or 0)) + curXP
