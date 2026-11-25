@@ -1,0 +1,17 @@
+<Bindings>
+  <Binding name="LEVELGUIDE_TOGGLE" header="LEVELGUIDE" category="ADDONS">
+    if LevelGuide and LevelGuide.UI then LevelGuide.UI.Toggle() end
+  </Binding>
+  <Binding name="LEVELGUIDE_SKIP" category="ADDONS">
+    if LevelGuide and LevelGuide.CmdSkip then LevelGuide.CmdSkip() end
+  </Binding>
+  <Binding name="LEVELGUIDE_PIN" category="ADDONS">
+    if LevelGuide and LevelGuide.CmdPin then LevelGuide.CmdPin() end
+  </Binding>
+  <Binding name="LEVELGUIDE_SPEAK" category="ADDONS">
+    if LevelGuide and LevelGuide.CmdSpeak then LevelGuide.CmdSpeak() end
+  </Binding>
+  <Binding name="LEVELGUIDE_RESYNC" category="ADDONS">
+    if LevelGuide and LevelGuide.CmdRecalibrate then LevelGuide.CmdRecalibrate() end
+  </Binding>
+</Bindings>

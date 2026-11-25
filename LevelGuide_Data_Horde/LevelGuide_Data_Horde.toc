@@ -1,0 +1,7 @@
+## Interface: 16001
+## Title: LevelGuide Data (Horde)
+## Notes: Quest data for Horde characters only. Loaded on demand.
+## LoadOnDemand: 1
+## Dependencies: LevelGuide
+## Author: generated from pfQuest (MIT)
+Data.lua

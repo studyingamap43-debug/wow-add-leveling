@@ -1,0 +1,31 @@
+## Interface: 16001
+## Title: LevelGuide
+## Notes: Adaptive 1-60 leveling guide with World Map pins & trail dots, GatherMate2/GatherLite herb & mine nodes, Arrow, Minimap trail, Timer, TTS & 12 professions.
+## Author: LevelGuide (WoW: Forever 1.60.1)
+## Version: 1.0.1
+## SavedVariablesPerCharacter: LevelGuideDB
+## OptionalDeps: TomTom, Questie, RareScanner, PathForever, GatherMate2, GatherMate2_Data, GatherLite, OpenMap, Leatrix_Maps, Syndicator, Baganator, Auctionator, BtWQuests, DialogueUI, WhatsTraining
+
+Core.lua
+Compat.lua
+Theme.lua
+Integrations.lua
+GatherNodes.lua
+Arrow.lua
+MinimapTrail.lua
+WorldMapOverlay.lua
+Waypoint.lua
+RareAlert.lua
+PathInfo.lua
+Travel.lua
+Discoveries.lua
+Rewards.lua
+Metrics.lua
+Timer.lua
+Voice.lua
+Reminders.lua
+Twink.lua
+Engine.lua
+Fallback.lua
+UI.lua
+Main.lua
